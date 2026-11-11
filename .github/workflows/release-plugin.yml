@@ -1,0 +1,82 @@
+name: Release plugin
+on:
+  push:
+    tags: ['*/v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag: com.emssion.schedule-calendar/v0.1.0'
+        required: true
+permissions:
+  contents: write
+concurrency:
+  group: plugin-release-${{ github.event.inputs.tag || github.ref }}
+  cancel-in-progress: false
+jobs:
+  release:
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          path: ultra-bar-plugins
+          ref: ${{ github.event.inputs.tag || github.ref }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Resolve SDK revision
+        id: sdk
+        shell: pwsh
+        run: |
+          $revision = (Get-Content ultra-bar-plugins/sdk-revision.txt -Raw).Trim()
+          if ($revision -notmatch '^[a-f0-9]{40}$') { throw 'Invalid pinned SDK revision' }
+          "revision=$revision" >> $env:GITHUB_OUTPUT
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: adoin/ultra-bar
+          path: ultra-bar
+          ref: ${{ steps.sdk.outputs.revision }}
+          persist-credentials: false
+      - name: Validate tag and toolchain
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          if ($env:RELEASE_TAG -notmatch '^([a-z][a-z0-9.-]+)/v(.+)$') { throw 'Invalid plugin release tag' }
+          $pluginId = $Matches[1]
+          git -C ultra-bar-plugins rev-parse --verify "refs/tags/$env:RELEASE_TAG"
+          if ($LASTEXITCODE -ne 0) { throw 'Tag does not exist' }
+          $tagCommit = git -C ultra-bar-plugins rev-parse "refs/tags/$($env:RELEASE_TAG)^{commit}"
+          $headCommit = git -C ultra-bar-plugins rev-parse HEAD
+          if ($tagCommit -ne $headCommit) { throw 'Checked-out source is not the requested tag commit' }
+          "PLUGIN_ID=$pluginId" >> $env:GITHUB_ENV
+          "RELEASE_TAG=$env:RELEASE_TAG" >> $env:GITHUB_ENV
+          rustup toolchain install 1.96.0 --profile minimal
+          rustup default 1.96.0
+      - name: Test native plugin
+        shell: pwsh
+        run: |
+          $manifest = Get-ChildItem ultra-bar-plugins -Filter plugin.json -Recurse -File | Where-Object { (Get-Content $_.FullName -Raw | ConvertFrom-Json).id -eq $env:PLUGIN_ID } | Select-Object -First 1
+          if (-not $manifest) { throw 'Plugin id not found' }
+          $cargo = Join-Path $manifest.Directory.FullName 'Cargo.toml'
+          if (Test-Path -LiteralPath $cargo) { cargo test --locked --manifest-path $cargo --jobs 1; if ($LASTEXITCODE -ne 0) { throw 'Plugin tests failed' } }
+      - name: Build and package release
+        shell: pwsh
+        run: |
+          ./ultra-bar-plugins/scripts/package-plugin.ps1 -PluginId $env:PLUGIN_ID -Tag $env:RELEASE_TAG -OutputDirectory (Join-Path $PWD 'release-output')
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: plugin-${{ env.PLUGIN_ID }}-${{ github.sha }}
+          path: release-output/*
+          if-no-files-found: error
+      - name: Publish GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $repo = '${{ github.repository }}'
+          gh release view $env:RELEASE_TAG --repo $repo *> $null
+          if ($LASTEXITCODE -eq 0) { throw 'Release already exists; publish a new version instead of replacing assets' }
+          $extra = @()
+          $version = ($env:RELEASE_TAG -split '/v')[-1]
+          if (($version -split '\+')[0] -match '-') { $extra += '--prerelease' }
+          gh release create $env:RELEASE_TAG --repo $repo --verify-tag --title "$env:PLUGIN_ID $env:RELEASE_TAG" --generate-notes @extra (Get-ChildItem release-output -File).FullName
+          if ($LASTEXITCODE -ne 0) { throw 'Release publication failed' }

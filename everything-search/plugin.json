@@ -1,0 +1,13 @@
+{
+  "id": "com.emssion.everything-search",
+  "name": "Everything Search",
+  "version": "0.2.0",
+  "api_version": 3,
+  "entry": "main.rn",
+  "slot": "leading",
+  "width": 20,
+  "icon": "",
+  "capabilities": ["panel", "service", "shell.open"],
+  "service": true,
+  "panel": { "runtime": ".runtime/current.json", "binary": "everything-search", "background": true }
+}

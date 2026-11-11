@@ -1,0 +1,11 @@
+[package]
+name = "everything-search"
+version = "0.2.0"
+edition = "2024"
+[dependencies]
+anyhow = "1"
+serde_json = "1"
+serde = { version = "1", features = ["derive"] }
+ultra-bar-native-ui = { path = "../../ultra-bar/crates/native-ui" }
+ultra-bar-plugin-ui = { path = "../../ultra-bar/crates/plugin-ui" }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_DataExchange", "Win32_System_Registry", "Win32_System_LibraryLoader", "Win32_UI_WindowsAndMessaging"] }

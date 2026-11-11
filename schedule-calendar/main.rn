@@ -1,0 +1,4 @@
+pub fn render(clicks) { ("{time}", "panel") }
+pub fn configuration() {
+    "{\"title\":\"Schedule Calendar\",\"views\":[\"今天\",\"月视图\",\"全部日程\",\"已完成\"],\"weekdays\":[\"一\",\"二\",\"三\",\"四\",\"五\",\"六\",\"日\"]}"
+}

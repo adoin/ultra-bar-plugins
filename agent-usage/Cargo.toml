@@ -1,0 +1,10 @@
+[package]
+name = "agent-usage"
+version = "0.2.0"
+edition = "2024"
+[dependencies]
+anyhow = "1"
+notify = "8"
+serde_json = "1"
+ultra-bar-plugin-ui = { path = "../../ultra-bar/crates/plugin-ui" }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Networking_WinHttp", "Win32_System_Threading"] }

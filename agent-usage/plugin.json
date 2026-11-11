@@ -1,0 +1,12 @@
+{
+  "id": "com.emssion.agent-usage",
+  "name": "Agent Usage",
+  "version": "0.2.0",
+  "api_version": 3,
+  "entry": "main.rn",
+  "slot": "tray",
+  "width": 112,
+  "capabilities": ["panel", "service", "foreground"],
+  "service": true,
+  "panel": { "runtime": ".runtime/current.json", "binary": "agent-usage", "background": true }
+}
