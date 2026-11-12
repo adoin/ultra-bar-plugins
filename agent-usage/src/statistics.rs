@@ -12,7 +12,7 @@ use std::{
 };
 use ultra_bar_plugin_ui::{
     Panel,
-    statistics::{Agent, Bucket, Dataset, Tokens},
+    statistics::{Agent, Bucket, Dataset, StatisticsMode, Tokens},
 };
 #[derive(Default, Serialize, Deserialize)]
 struct FileState {
@@ -309,6 +309,44 @@ pub struct Service {
     panel: Panel,
     directory: PathBuf,
 }
+pub(crate) fn grok_agent() -> Agent {
+    let conversations = crate::grok_conversations::read().unwrap_or_else(|error| {
+        ultra_bar_native_ui::diagnostics::event(
+            "usage",
+            "grok.conversations_failed",
+            serde_json::json!({"error":error.to_string()}),
+        );
+        None
+    });
+    let source = conversations
+        .as_ref()
+        .map(|data| {
+            if data.partial {
+                "本地已同步消息 · 最近 30 天 · 部分历史未保留"
+            } else {
+                "本地已同步消息 · 最近 30 天"
+            }
+            .to_owned()
+        })
+        .unwrap_or_default();
+    Agent {
+        id: "Grok Bot".into(),
+        name: "Grok Bot".into(),
+        quota: crate::grok::read()
+            .ok()
+            .and_then(|q| q.remaining)
+            .map(|r| format!("{r:.1}%"))
+            .unwrap_or_else(|| "—".into()),
+        mode: if conversations.is_some() {
+            StatisticsMode::Conversations
+        } else {
+            StatisticsMode::Blank
+        },
+        conversations,
+        source,
+        ..Default::default()
+    }
+}
 fn progress(dir: &Path, phase: &str, files: usize) {
     let _ = fs::write(
         dir.join("statistics-progress.json"),
@@ -339,17 +377,7 @@ impl Service {
                 });
             }
             if crate::grok::installed() {
-                agents.push(Agent {
-                    id: "Grok Bot".into(),
-                    name: "Grok Bot".into(),
-                    quota: crate::grok::read()
-                        .ok()
-                        .and_then(|q| q.remaining)
-                        .map(|r| format!("{r:.1}%"))
-                        .unwrap_or_else(|| "—".into()),
-                    source: "Grok Bot 本地额度快照".into(),
-                    ..Default::default()
-                });
+                agents.push(grok_agent());
             }
             (
                 Arc::new(Mutex::new(Dataset {
@@ -474,18 +502,7 @@ impl Service {
                     agents.push(agent);
                 }
                 if crate::grok::installed() {
-                    let quota = crate::grok::read()
-                        .ok()
-                        .and_then(|q| q.remaining)
-                        .map(|r| format!("{r:.1}%"))
-                        .unwrap_or_else(|| "—".into());
-                    agents.push(Agent {
-                        id: "Grok Bot".into(),
-                        name: "Grok Bot".into(),
-                        quota,
-                        source: "Grok Bot 本地额度快照 · 未提供 Token 明细".into(),
-                        ..Default::default()
-                    });
+                    agents.push(grok_agent());
                 }
                 let mut dataset = Dataset {
                     today,

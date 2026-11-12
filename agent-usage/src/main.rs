@@ -4,6 +4,7 @@ mod cache;
 mod claude;
 mod codex;
 mod grok;
+mod grok_conversations;
 mod statistics;
 use anyhow::{Result, ensure};
 use notify::{RecursiveMode, Watcher};
@@ -60,6 +61,46 @@ fn foreground_provider(executable: &str, title: &str) -> Option<usize> {
             }
         }
         _ => None,
+    }
+}
+fn widget_agents(
+    enabled: [bool; 3],
+    only_active: bool,
+    foreground: Option<usize>,
+    active: &[Option<Instant>; 3],
+    subscribed: [bool; 3],
+) -> [bool; 3] {
+    std::array::from_fn(|i| {
+        enabled[i]
+            && if only_active {
+                foreground == Some(i) || active[i].is_some_and(|t| t.elapsed() < activity::TTL)
+            } else {
+                subscribed[i]
+            }
+    })
+}
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+struct Preferences {
+    enabled: [bool; 3],
+    only_active: bool,
+}
+impl Default for Preferences {
+    fn default() -> Self {
+        Self {
+            enabled: [true; 3],
+            only_active: false,
+        }
+    }
+}
+impl Preferences {
+    fn decode(bytes: &[u8]) -> Option<Self> {
+        serde_json::from_slice(bytes).ok().or_else(|| {
+            serde_json::from_slice(bytes).ok().map(|enabled| Self {
+                enabled,
+                ..Self::default()
+            })
+        })
     }
 }
 fn window(used: &Value, label: &str, reset: &Value) -> Option<(f64, String)> {
@@ -174,10 +215,11 @@ fn countdown(at: u64, now: u64) -> String {
     }
 }
 fn page(name: &str, q: &Quota) -> Page {
+    let label = if name == "Grok Bot" { "Grok" } else { name };
     let text = q
         .remaining
-        .map(|r| format!("{name} {r:.0}%"))
-        .unwrap_or_else(|| format!("{name} —"));
+        .map(|r| format!("{label} {r:.0}%"))
+        .unwrap_or_else(|| format!("{label} —"));
     let mut detail = if q.windows.is_empty() {
         "当前账户未提供订阅额度".into()
     } else {
@@ -199,19 +241,34 @@ fn page(name: &str, q: &Quota) -> Page {
     Page {
         id: name.into(),
         text,
-        trailing: if name == "Codex" {
-            q.next_reset
-                .map(|at| countdown(at, cache::now()))
-                .unwrap_or_default()
-        } else {
-            String::new()
-        },
+        trailing: q
+            .next_reset
+            .map(|at| countdown(at, cache::now()))
+            .unwrap_or_default(),
         tooltip: format!("{name}\n{detail}"),
         progress: q.remaining.map(|v| v / 100.0),
     }
 }
 fn main() -> Result<()> {
     let args: Vec<_> = std::env::args().collect();
+    if args
+        .get(1)
+        .is_some_and(|s| s == "--probe-grok-conversations")
+    {
+        let output = args
+            .get(2)
+            .ok_or_else(|| anyhow::anyhow!("Missing output"))?;
+        let dataset = ultra_bar_plugin_ui::statistics::Dataset {
+            agents: vec![statistics::grok_agent()],
+            today: {
+                use chrono::Datelike;
+                chrono::Local::now().date_naive().num_days_from_ce()
+            },
+            loading: false,
+        };
+        std::fs::write(output, serde_json::to_vec_pretty(&dataset)?)?;
+        return Ok(());
+    }
     if args.get(1).is_some_and(|s| s == "--statistics-smoke") {
         ultra_bar_plugin_ui::statistics::smoke(std::path::Path::new(
             args.get(2)
@@ -257,6 +314,9 @@ fn main() -> Result<()> {
         let names = ["Codex", "Claude", "Grok Bot"];
         let mut data = PathBuf::new();
         let mut enabled = [true; 3];
+        let mut only_active = false;
+        let mut connected = [false; 3];
+        let mut subscribed = [false; 3];
         let mut client: Option<codex::Client> = None;
         let mut home: Option<PathBuf> = None;
         let mut watcher = None;
@@ -282,11 +342,14 @@ fn main() -> Result<()> {
             {
                 Ok(Command::Host(HostEvent::Initialize { data_dir, .. })) => {
                     data = data_dir.into();
-                    enabled = std::fs::read(data.join("preferences.json"))
+                    let preferences = std::fs::read(data.join("preferences.json"))
                         .ok()
-                        .and_then(|b| serde_json::from_slice(&b).ok())
-                        .unwrap_or([true; 3]);
-                    panel.settings(agent_fields(&enabled));
+                        .and_then(|b| Preferences::decode(&b))
+                        .unwrap_or_default();
+                    enabled = preferences.enabled;
+                    only_active = preferences.only_active;
+                    panel.settings(agent_fields(&enabled, only_active));
+                    let grok_available = grok::installed();
                     let config = data.join("connections.json");
                     let saved: Value = std::fs::read(&config)
                         .ok()
@@ -310,7 +373,15 @@ fn main() -> Result<()> {
                     let codex_sessions = home.as_ref().unwrap().join("sessions");
                     if let Some(saved) = cache::load(&data, home.as_ref().unwrap()) {
                         quotas[0] = saved;
+                        subscribed[0] = true;
                     }
+                    connected = [
+                        home.as_ref().unwrap().join("auth.json").is_file(),
+                        claude::home().join(".credentials.json").is_file()
+                            || data.join("claude-rate-limits.json").is_file(),
+                        grok_available,
+                    ];
+                    subscribed[2] = grok::has_subscription();
                     statistics = Some(statistics::Service::start(
                         home.as_ref().unwrap().clone(),
                         data.clone(),
@@ -323,6 +394,7 @@ fn main() -> Result<()> {
                     let tx = events.clone();
                     let h = home.as_ref().unwrap().clone();
                     let q = quiet.clone();
+                    let g = grok::snapshot_dir();
                     watcher =
                         notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
                             if let Ok(e) = event {
@@ -334,6 +406,18 @@ fn main() -> Result<()> {
                                         let _ = tx.try_send(i);
                                     }
                                 }
+                                if matches!(
+                                    e.kind,
+                                    notify::EventKind::Create(_)
+                                        | notify::EventKind::Modify(_)
+                                        | notify::EventKind::Remove(_)
+                                ) && e.paths.iter().any(|path| {
+                                    path.starts_with(&g)
+                                        && (grok::is_snapshot(path)
+                                            || grok_conversations::session(path).is_some())
+                                }) {
+                                    let _ = tx.try_send(2);
+                                }
                             }
                         })
                         .ok();
@@ -344,6 +428,9 @@ fn main() -> Result<()> {
                         }
                         if claude_projects.exists() {
                             let _ = w.watch(&claude_projects, RecursiveMode::Recursive);
+                        }
+                        if grok_available {
+                            let _ = w.watch(&grok::snapshot_dir(), RecursiveMode::NonRecursive);
                         }
                     }
                     let _ = send(&PluginEvent::Ready);
@@ -362,17 +449,26 @@ fn main() -> Result<()> {
                     force = true;
                 }
                 Ok(Command::SettingsSaved(values)) => {
-                    if values.len() == 3 {
+                    if values.len() == 4 {
                         let next = std::array::from_fn(|i| values[i] == "1");
+                        let next_only_active = values[3] == "1";
                         let saved = (|| -> anyhow::Result<()> {
                             let pending = data.join("preferences.json.new");
-                            std::fs::write(&pending, serde_json::to_vec_pretty(&next)?)?;
+                            std::fs::write(
+                                &pending,
+                                serde_json::to_vec_pretty(&Preferences {
+                                    enabled: next,
+                                    only_active: next_only_active,
+                                })?,
+                            )?;
                             std::fs::rename(pending, data.join("preferences.json"))?;
                             Ok(())
                         })();
                         if saved.is_ok() {
                             enabled = next;
-                            panel.settings(agent_fields(&enabled));
+                            only_active = next_only_active;
+                            force = true;
+                            panel.settings(agent_fields(&enabled, only_active));
                         } else if let Err(error) = saved {
                             panel.settings_error(error.to_string());
                             panel.update(vec![], error.to_string());
@@ -393,6 +489,9 @@ fn main() -> Result<()> {
             while let Ok(i) = event_rx.try_recv() {
                 statistics_dirty = true;
                 active[i] = Some(Instant::now());
+                if i == 2 {
+                    due[i] = Instant::now();
+                }
             }
             if statistics_dirty
                 && statistics_at.elapsed().as_secs() >= 5
@@ -406,12 +505,9 @@ fn main() -> Result<()> {
             if data.as_os_str().is_empty() || stopped {
                 continue;
             }
+            let shown = widget_agents(enabled, only_active, foreground_agent, &active, subscribed);
             let initial: Vec<_> = (0..3)
-                .filter(|i| {
-                    enabled[*i]
-                        && (foreground_agent == Some(*i)
-                            || active[*i].is_some_and(|t| t.elapsed() < activity::TTL))
-                })
+                .filter(|i| shown[*i])
                 .map(|i| {
                     if quotas[i].remaining.is_none() && quotas[i].error.is_empty() {
                         quotas[i].error = "正在读取额度".into();
@@ -419,15 +515,30 @@ fn main() -> Result<()> {
                     page(names[i], &quotas[i])
                 })
                 .collect();
+            if initial
+                .iter()
+                .map(|p| &p.id)
+                .ne(previous.iter().map(|p: &Page| &p.id))
+            {
+                ultra_bar_native_ui::diagnostics::event(
+                    "usage",
+                    "widget.providers",
+                    json!({
+                    "enabled":enabled,"only_active":only_active,"subscribed":subscribed,
+                        "visible":initial.iter().map(|p| &p.id).collect::<Vec<_>>()
+                    }),
+                );
+            }
             if initial != previous {
                 let _ = send(&PluginEvent::Widget {
                     pages: initial.clone(),
                 });
                 previous = initial;
             }
+            let active_shown = widget_agents(enabled, true, foreground_agent, &active, subscribed);
             for i in 0..3 {
-                let running = foreground_agent == Some(i)
-                    || active[i].is_some_and(|t| t.elapsed().as_secs() < 300);
+                let running = active_shown[i]
+                    || (enabled[i] && !only_active && (connected[i] || subscribed[i]));
                 if (running || show) && (force || Instant::now() >= due[i]) {
                     let _own_query = (i == 0).then(|| quiet.query());
                     refreshed = true;
@@ -454,6 +565,7 @@ fn main() -> Result<()> {
                     let failed = result.is_err();
                     quotas[i] = match result {
                         Ok(q) => {
+                            subscribed[i] = q.remaining.is_some();
                             if i == 0 {
                                 cache::save(&data, home.as_ref().unwrap(), &q);
                             }
@@ -479,12 +591,9 @@ fn main() -> Result<()> {
                         });
                 }
             }
+            let shown = widget_agents(enabled, only_active, foreground_agent, &active, subscribed);
             let pages: Vec<_> = (0..3)
-                .filter(|i| {
-                    enabled[*i]
-                        && (foreground_agent == Some(*i)
-                            || active[*i].is_some_and(|t| t.elapsed().as_secs() < 300))
-                })
+                .filter(|i| shown[*i])
                 .map(|i| page(names[i], &quotas[i]))
                 .collect();
             if pages != previous {
@@ -495,6 +604,7 @@ fn main() -> Result<()> {
             }
             if !show
                 && client.is_some()
+                && (only_active || !enabled[0])
                 && foreground_agent != Some(0)
                 && active[0].is_none_or(|t| t.elapsed().as_secs() >= 300)
             {
@@ -513,6 +623,53 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn subscriptions_rotate_when_idle_and_active_only_is_optional() {
+        let idle = [Some(Instant::now() - Duration::from_secs(301)); 3];
+        assert_eq!(
+            widget_agents([true; 3], false, None, &idle, [false, false, true]),
+            [false, false, true]
+        );
+        assert_eq!(
+            widget_agents(
+                [true, true, false],
+                false,
+                None,
+                &idle,
+                [false, false, true]
+            ),
+            [false; 3]
+        );
+        assert_eq!(
+            widget_agents([true; 3], true, None, &idle, [true; 3]),
+            [false; 3]
+        );
+        assert_eq!(
+            widget_agents([true; 3], false, None, &idle, [true, false, true]),
+            [true, false, true]
+        );
+        assert_eq!(
+            widget_agents([true; 3], false, Some(0), &idle, [false, false, true]),
+            [false, false, true]
+        );
+        assert_eq!(
+            widget_agents([true; 3], true, Some(0), &idle, [true; 3]),
+            [true, false, false]
+        );
+    }
+    #[test]
+    fn old_preferences_keep_individual_switches_and_new_mode_round_trips() {
+        let old = Preferences::decode(b"[true,false,true]").unwrap();
+        assert_eq!(old.enabled, [true, false, true]);
+        assert!(!old.only_active);
+        let value = Preferences {
+            only_active: true,
+            ..old
+        };
+        let loaded = Preferences::decode(&serde_json::to_vec(&value).unwrap()).unwrap();
+        assert!(loaded.only_active);
+        assert_eq!(loaded.enabled, [true, false, true]);
+    }
     #[test]
     fn codex_msix_client_is_recognized_without_matching_the_chatgpt_client() {
         assert_eq!(
@@ -633,8 +790,8 @@ mod tests {
     }
 }
 
-fn agent_fields(enabled: &[bool; 3]) -> Vec<ultra_bar_native_ui::form::Field> {
-    [
+fn agent_fields(enabled: &[bool; 3], only_active: bool) -> Vec<ultra_bar_native_ui::form::Field> {
+    let mut fields: Vec<_> = [
         "在任务栏显示 Codex",
         "在任务栏显示 Claude",
         "在任务栏显示 Grok Bot",
@@ -644,5 +801,11 @@ fn agent_fields(enabled: &[bool; 3]) -> Vec<ultra_bar_native_ui::form::Field> {
     .map(|(i, name)| {
         ultra_bar_native_ui::form::Field::choice(name, usize::from(enabled[i]), &["关闭", "开启"])
     })
-    .collect()
+    .collect();
+    fields.push(ultra_bar_native_ui::form::Field::choice(
+        "只展示活跃状态",
+        usize::from(only_active),
+        &["关闭", "开启"],
+    ));
+    fields
 }
