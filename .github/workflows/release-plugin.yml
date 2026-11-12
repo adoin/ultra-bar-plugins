@@ -5,16 +5,21 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Existing tag: com.emssion.schedule-calendar/v0.1.0'
-        required: true
+        description: 'Existing release tag; leave empty for build-only validation'
+        required: false
+      plugin_id:
+        description: 'Plugin id for build-only validation'
+        required: false
+        default: 'com.emssion.schedule-calendar'
 permissions:
   contents: write
 concurrency:
-  group: plugin-release-${{ github.event.inputs.tag || github.ref }}
+  group: plugin-release-${{ github.event.inputs.tag || github.event.inputs.plugin_id || github.ref }}
   cancel-in-progress: false
 jobs:
   release:
     runs-on: windows-2025
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -40,15 +45,22 @@ jobs:
         env:
           RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
         run: |
-          if ($env:RELEASE_TAG -notmatch '^([a-z][a-z0-9.-]+)/v(.+)$') { throw 'Invalid plugin release tag' }
-          $pluginId = $Matches[1]
-          git -C ultra-bar-plugins rev-parse --verify "refs/tags/$env:RELEASE_TAG"
-          if ($LASTEXITCODE -ne 0) { throw 'Tag does not exist' }
-          $tagCommit = git -C ultra-bar-plugins rev-parse "refs/tags/$($env:RELEASE_TAG)^{commit}"
-          $headCommit = git -C ultra-bar-plugins rev-parse HEAD
-          if ($tagCommit -ne $headCommit) { throw 'Checked-out source is not the requested tag commit' }
+          if ('${{ github.event_name }}' -eq 'workflow_dispatch' -and -not '${{ github.event.inputs.tag }}') {
+            $pluginId = '${{ github.event.inputs.plugin_id }}'
+            $releaseTag = ''
+          } else {
+            if ($env:RELEASE_TAG -notmatch '^([a-z][a-z0-9.-]+)/v(.+)$') { throw 'Invalid plugin release tag' }
+            $pluginId = $Matches[1]
+            $releaseTag = $env:RELEASE_TAG
+            git -C ultra-bar-plugins rev-parse --verify "refs/tags/$releaseTag"
+            if ($LASTEXITCODE -ne 0) { throw 'Tag does not exist' }
+            $tagCommit = git -C ultra-bar-plugins rev-parse "refs/tags/$releaseTag^{commit}"
+            $headCommit = git -C ultra-bar-plugins rev-parse HEAD
+            if ($tagCommit -ne $headCommit) { throw 'Checked-out source is not the requested tag commit' }
+          }
+          if ($pluginId -notmatch '^[a-z][a-z0-9-]*(\.[a-z][a-z0-9-]*){2,}$') { throw 'Invalid plugin id' }
           "PLUGIN_ID=$pluginId" >> $env:GITHUB_ENV
-          "RELEASE_TAG=$env:RELEASE_TAG" >> $env:GITHUB_ENV
+          "RELEASE_TAG=$releaseTag" >> $env:GITHUB_ENV
           rustup toolchain install 1.96.0 --profile minimal
           rustup default 1.96.0
       - name: Test native plugin
@@ -67,7 +79,9 @@ jobs:
           name: plugin-${{ env.PLUGIN_ID }}-${{ github.sha }}
           path: release-output/*
           if-no-files-found: error
+          retention-days: 90
       - name: Publish GitHub Release
+        if: env.RELEASE_TAG != ''
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}

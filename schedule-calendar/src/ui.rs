@@ -12,11 +12,8 @@ use ultra_bar_native_ui::{Surface, Tip, Tooltips, wide};
 use windows_sys::Win32::{
     Foundation::*,
     Graphics::Gdi::*,
-    System::{LibraryLoader::*, Threading::*},
-    UI::{
-        Controls::Dialogs::*, Controls::*, HiDpi::*, Input::KeyboardAndMouse::IsWindowEnabled,
-        WindowsAndMessaging::*,
-    },
+    System::{DataExchange::COPYDATASTRUCT, LibraryLoader::*, Threading::*},
+    UI::{Controls::*, HiDpi::*, Input::KeyboardAndMouse::IsWindowEnabled, WindowsAndMessaging::*},
 };
 
 #[derive(Clone)]
@@ -42,8 +39,13 @@ struct Hit {
     tip: String,
 }
 pub struct App {
+    popover: ultra_bar_native_ui::popover::Popover,
     pub region: crate::region::Config,
     region_dir: PathBuf,
+    settings_dir: PathBuf,
+    pending_settings: Option<ultra_bar_native_ui::settings_bridge::SaveRequest>,
+    pending_editor: std::collections::VecDeque<ultra_bar_native_ui::editor_bridge::EditorEvent>,
+    pending_path: Option<(u64, i32)>,
     weather_worker: Option<crate::region::Worker>,
     weather: crate::region::Weather,
     weather_error: String,
@@ -72,30 +74,40 @@ pub struct App {
     last_minute: i64,
     pub smoke: bool,
 }
+fn apply_region(state: &mut App, values: &[String]) -> Result<()> {
+    let config = crate::region::Config::parse(values)?;
+    crate::region::save_key(&values[7])?;
+    crate::region::save(&state.region_dir, &config)?;
+    crate::region::set_timezone(&config.timezone)?;
+    state.region = config;
+    if let Some(worker) = &state.weather_worker {
+        let _ = worker
+            .send
+            .try_send(crate::region::Request::Configure(state.region.clone()));
+        if !values[7].trim().is_empty() {
+            let _ = worker.send.try_send(crate::region::Request::Refresh);
+        }
+    }
+    Ok(())
+}
+fn publish_settings(state: &App, error: String, ack: Option<u64>) {
+    let _ = ultra_bar_native_ui::settings_bridge::publish_ack(
+        &state.settings_dir,
+        state.owner as isize,
+        state.region.fields(),
+        error,
+        ack,
+    );
+}
 unsafe fn region_settings(state: &mut App) {
     unsafe {
-        if let Some(values) =
-            ultra_bar_native_ui::form::edit(state.hwnd, "地区与天气", state.region.fields())
-        {
-            let result = (|| -> Result<()> {
-                let config = crate::region::Config::parse(&values)?;
-                crate::region::save_key(&values[7])?;
-                crate::region::save(&state.region_dir, &config)?;
-                crate::region::set_timezone(&config.timezone)?;
-                state.region = config;
-                if let Some(worker) = &state.weather_worker {
-                    let _ = worker
-                        .send
-                        .try_send(crate::region::Request::Configure(state.region.clone()));
-                    if !values[7].trim().is_empty() {
-                        let _ = worker.send.try_send(crate::region::Request::Refresh);
-                    }
-                }
-                Ok(())
-            })();
-            error(state.hwnd, result);
-        }
-        InvalidateRect(state.hwnd, null(), 0);
+        let result = ultra_bar_native_ui::editor_bridge::request(
+            state.owner,
+            state.hwnd,
+            "com.emssion.schedule-calendar",
+            ultra_bar_native_ui::editor_bridge::Operation::Settings,
+        );
+        error(state.hwnd, result.map_err(anyhow::Error::msg));
     }
 }
 pub fn today() -> NaiveDate {
@@ -303,8 +315,15 @@ pub unsafe fn run(
         };
         anyhow::ensure!(parent == 0 || !parent_handle.is_null(), "任务栏进程已退出");
         let mut state = Box::new(App {
+            popover: Default::default(),
             region,
             region_dir: directory.clone(),
+            settings_dir: std::env::var_os("ULTRA_BAR_CLOCK_STATE")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| directory.clone()),
+            pending_settings: None,
+            pending_editor: std::collections::VecDeque::new(),
+            pending_path: None,
             weather_worker: None,
             weather: Default::default(),
             weather_error: String::new(),
@@ -349,6 +368,7 @@ pub unsafe fn run(
         );
         anyhow::ensure!(!hwnd.is_null(), "无法创建日历窗口");
         state.hwnd = hwnd;
+        publish_settings(&state, String::new(), None);
         if !smoke {
             let public = std::env::var_os("ULTRA_BAR_CLOCK_STATE")
                 .map(PathBuf::from)
@@ -437,7 +457,7 @@ pub unsafe fn run(
             }
             crate::editor::smoke(&mut state)?;
             eprintln!(
-                "calendar smoke: 4 views rendered; 6 native editor rule kinds validated; no keyboard/mouse input"
+                "calendar smoke: 4 views rendered; 6 declarative schedule editor schemas validated; no keyboard/mouse input"
             );
             DestroyWindow(hwnd);
         } else {
@@ -565,14 +585,125 @@ unsafe extern "system" fn wndproc(hwnd: HWND, message: u32, w: WPARAM, l: LPARAM
                 0
             }
             WM_ERASEBKGND => 1,
+            WM_COPYDATA if l != 0 && w as HWND == state.owner => {
+                let packet = &*(l as *const COPYDATASTRUCT);
+                if packet.dwData == ultra_bar_native_ui::editor_bridge::EVENT
+                    && packet.cbData <= 65536
+                    && !packet.lpData.is_null()
+                {
+                    let bytes = std::slice::from_raw_parts(
+                        packet.lpData as *const u8,
+                        packet.cbData as usize,
+                    );
+                    if let Ok(event) = serde_json::from_slice(bytes) {
+                        state.pending_editor.push_back(event);
+                        PostMessageW(hwnd, WM_APP + 14, 0, 0);
+                        return 1;
+                    }
+                }
+                if packet.dwData == ultra_bar_native_ui::settings_bridge::COPYDATA_SETTINGS
+                    && packet.cbData <= 65536
+                    && !packet.lpData.is_null()
+                {
+                    let bytes = std::slice::from_raw_parts(
+                        packet.lpData as *const u8,
+                        packet.cbData as usize,
+                    );
+                    if let Ok(request) = serde_json::from_slice(bytes) {
+                        state.pending_settings = Some(request);
+                        PostMessageW(hwnd, WM_APP + 11, 0, 0);
+                        return 1;
+                    }
+                }
+                0
+            }
+            m if m == WM_APP + 14 => {
+                while let Some(event) = state.pending_editor.pop_front() {
+                    if event.action == "path" {
+                        if let Some((_, choice)) = state
+                            .pending_path
+                            .filter(|(session, _)| *session == event.session)
+                        {
+                            state.pending_path = None;
+                            if let Some(path) = event.values.get("path").filter(|s| !s.is_empty()) {
+                                let result = (|| -> Result<()> {
+                                    match choice {
+                                        1 => {
+                                            state.repo.import(&std::fs::read(path)?)?;
+                                        }
+                                        2 => std::fs::write(
+                                            path,
+                                            serde_json::to_vec_pretty(&state.repo.data)?,
+                                        )?,
+                                        3 => {
+                                            state
+                                                .repo
+                                                .import_holidays(&std::fs::read_to_string(path)?)?;
+                                        }
+                                        _ => {}
+                                    }
+                                    Ok(())
+                                })();
+                                error(hwnd, result);
+                                InvalidateRect(hwnd, null(), 0);
+                            }
+                        }
+                    } else {
+                        crate::editor::event(state, event);
+                    }
+                }
+                0
+            }
+            m if m == WM_APP + 11 => {
+                if let Some(request) = state.pending_settings.take() {
+                    let result = (|| -> Result<()> {
+                        anyhow::ensure!(
+                            IsWindowEnabled(hwnd) != 0
+                                && state
+                                    .editor
+                                    .as_ref()
+                                    .is_none_or(|editor| IsWindow(editor.hwnd) == 0),
+                            "请先保存或关闭日程编辑器"
+                        );
+                        anyhow::ensure!(
+                            ultra_bar_native_ui::settings_bridge::load(&state.settings_dir)?
+                                .revision
+                                == request.revision,
+                            "设置已在其他位置更改，请重新载入后再保存"
+                        );
+                        apply_region(state, &request.values)
+                    })();
+                    publish_settings(
+                        state,
+                        result.err().map(|e| e.to_string()).unwrap_or_default(),
+                        Some(request.revision),
+                    );
+                    InvalidateRect(hwnd, null(), 0);
+                }
+                0
+            }
+            m if m == RegisterWindowMessageW(wide("UltraBar.Plugin.Settings.v1").as_ptr()) => {
+                if IsWindowEnabled(hwnd) == 0 {
+                    SetForegroundWindow(GetLastActivePopup(hwnd));
+                } else if state
+                    .editor
+                    .as_ref()
+                    .is_some_and(|editor| IsWindow(editor.hwnd) != 0)
+                {
+                    if let Some(editor) = &state.editor {
+                        SetForegroundWindow(editor.hwnd);
+                    }
+                } else {
+                    region_settings(state);
+                }
+                0
+            }
             m if m == WM_APP + 1 => {
                 if let Some(editor) = &state.editor
                     && IsWindow(editor.hwnd) != 0
                 {
                     SetForegroundWindow(editor.hwnd);
-                } else if IsWindowVisible(hwnd) != 0 {
-                    ShowWindow(hwnd, SW_HIDE);
-                } else {
+                } else if state.popover.toggle(hwnd) {
                     show_panel(state);
                 }
                 0
@@ -633,7 +764,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, message: u32, w: WPARAM, l: LPARAM
                         .as_ref()
                         .is_none_or(|editor| IsWindow(editor.hwnd) == 0)
                 {
-                    ShowWindow(hwnd, SW_HIDE);
+                    state.popover.outside(hwnd);
                 }
                 0
             }
@@ -1199,43 +1330,6 @@ unsafe fn paint(state: &mut App) {
     }
 }
 
-unsafe fn file(owner: HWND, save: bool) -> Option<PathBuf> {
-    unsafe {
-        let mut buffer = [0u16; 32768];
-        let filter: Vec<u16> = "JSON 文件\0*.json\0\0".encode_utf16().collect();
-        let mut dialog: OPENFILENAMEW = zeroed();
-        dialog.lStructSize = size_of::<OPENFILENAMEW>() as _;
-        dialog.hwndOwner = owner;
-        dialog.lpstrFilter = filter.as_ptr();
-        dialog.lpstrFile = buffer.as_mut_ptr();
-        dialog.nMaxFile = buffer.len() as _;
-        dialog.lpstrDefExt = windows_sys::core::w!("json");
-        dialog.Flags = OFN_EXPLORER
-            | OFN_PATHMUSTEXIST
-            | if save {
-                OFN_OVERWRITEPROMPT
-            } else {
-                OFN_FILEMUSTEXIST
-            };
-        let result = if save {
-            GetSaveFileNameW(&mut dialog)
-        } else {
-            GetOpenFileNameW(&mut dialog)
-        };
-        if result == 0 {
-            return None;
-        }
-        Some(
-            String::from_utf16_lossy(
-                &buffer[..buffer
-                    .iter()
-                    .position(|ch| *ch == 0)
-                    .unwrap_or(buffer.len())],
-            )
-            .into(),
-        )
-    }
-}
 unsafe fn data_menu(state: &mut App) {
     unsafe {
         let menu = CreatePopupMenu();
@@ -1261,24 +1355,22 @@ unsafe fn data_menu(state: &mut App) {
         if choice == 0 {
             return;
         }
-        let Some(path) = file(state.hwnd, choice == 2) else {
-            return;
-        };
-        let result = (|| -> Result<()> {
-            match choice {
-                1 => {
-                    state.repo.import(&std::fs::read(path)?)?;
-                }
-                2 => std::fs::write(path, serde_json::to_vec_pretty(&state.repo.data)?)?,
-                3 => {
-                    state
-                        .repo
-                        .import_holidays(&std::fs::read_to_string(path)?)?;
-                }
-                _ => {}
-            }
-            Ok(())
-        })();
-        error(state.hwnd, result);
+        if (1..=3).contains(&choice) {
+            let session = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos() as u64;
+            state.pending_path = Some((session, choice));
+            let result = ultra_bar_native_ui::editor_bridge::request(
+                state.owner,
+                state.hwnd,
+                "com.emssion.schedule-calendar",
+                ultra_bar_native_ui::editor_bridge::Operation::ChoosePath {
+                    session,
+                    save: choice == 2,
+                },
+            );
+            error(state.hwnd, result.map_err(anyhow::Error::msg));
+        }
     }
 }

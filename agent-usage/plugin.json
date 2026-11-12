@@ -1,7 +1,7 @@
 {
   "id": "com.emssion.agent-usage",
   "name": "Agent Usage",
-  "version": "0.2.0",
+  "version": "1.0.0",
   "api_version": 3,
   "entry": "main.rn",
   "slot": "tray",

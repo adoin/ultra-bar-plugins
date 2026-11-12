@@ -1,4 +1,5 @@
 #![cfg_attr(not(test), windows_subsystem = "windows")]
+macro_rules! eprintln {($($arg:tt)*)=>{ultra_bar_native_ui::diagnostic_stderr!($($arg)*)};}
 mod calendar;
 mod editor;
 mod engine;
@@ -37,8 +38,33 @@ fn configuration(root: &std::path::Path) -> Result<Configuration> {
 }
 
 fn main() {
+    let _logs = match ultra_bar_native_ui::diagnostics::init("calendar", env!("CARGO_PKG_VERSION"))
+    {
+        Ok(l) => Some(l),
+        Err(error) => {
+            ::std::eprintln!("Cannot initialize diagnostic logs: {error}");
+            None
+        }
+    };
+    let ok = run_main();
+    ultra_bar_native_ui::diagnostics::event(
+        "lifecycle",
+        "process.end",
+        serde_json::json!({"ok":ok}),
+    );
+    drop(_logs);
+    if !ok {
+        std::process::exit(1);
+    }
+}
+fn run_main() -> bool {
     ultra_bar_native_ui::theme::init_from_env();
     if let Err(error) = run() {
+        ultra_bar_native_ui::diagnostics::event(
+            "errors",
+            "calendar.failed",
+            serde_json::json!({"error":format!("{error:#}")}),
+        );
         if std::env::args().any(|arg| {
             matches!(
                 arg.as_str(),
@@ -46,7 +72,7 @@ fn main() {
             )
         }) {
             eprintln!("{error:#}");
-            std::process::exit(1);
+            return false;
         }
         unsafe {
             windows_sys::Win32::UI::WindowsAndMessaging::MessageBoxW(
@@ -56,18 +82,19 @@ fn main() {
                 0x10,
             );
         }
+        return false;
     }
+    true
 }
 fn run() -> Result<()> {
     let args: Vec<_> = std::env::args().collect();
     if args.get(1).is_some_and(|s| s == "--region-smoke") {
-        for dpi in [96, 144, 192] {
-            ultra_bar_native_ui::form::capture(
-                std::path::Path::new(args.get(2).context("Missing output directory")?),
-                dpi,
-                region::Config::default().fields(),
-            )?;
-        }
+        let directory = std::path::Path::new(args.get(2).context("Missing output directory")?);
+        std::fs::create_dir_all(directory)?;
+        std::fs::write(
+            directory.join("region-settings-schema.json"),
+            serde_json::to_vec_pretty(&region::Config::default().fields())?,
+        )?;
         return Ok(());
     }
     let probe: Vec<_> = std::env::args().collect();

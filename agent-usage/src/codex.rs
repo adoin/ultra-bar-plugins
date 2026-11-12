@@ -50,6 +50,9 @@ fn executable() -> Result<PathBuf> {
     anyhow::bail!("未找到 Codex CLI")
 }
 impl Client {
+    pub fn alive(&mut self) -> bool {
+        self.child.try_wait().is_ok_and(|status| status.is_none())
+    }
     pub fn start(home: Option<&std::path::Path>) -> Result<Self> {
         let mut command = Command::new(executable()?);
         command
@@ -108,16 +111,42 @@ impl Client {
             v["params"] = p;
         }
         self.write(&v)?;
-        let end = Instant::now() + Duration::from_secs(8);
+        // The host deliberately caps this service at 5% CPU on one processor.
+        // Cold CLI startup needs more wall time; account requests remain short.
+        let end =
+            Instant::now() + Duration::from_secs(if method == "initialize" { 60 } else { 30 });
         while let Some(left) = end.checked_duration_since(Instant::now()) {
-            let reply = self
-                .output
-                .recv_timeout(left)
-                .context("Codex 账户查询超时")?;
+            let reply = match self.output.recv_timeout(left) {
+                Ok(reply) => reply,
+                Err(mpsc::RecvTimeoutError::Timeout) => anyhow::bail!("Codex {method} 查询超时"),
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    let stop = Instant::now() + Duration::from_millis(100);
+                    let exit = loop {
+                        let status = self.child.try_wait()?;
+                        if status.is_some() || Instant::now() >= stop {
+                            break status;
+                        }
+                        std::thread::sleep(Duration::from_millis(5));
+                    };
+                    anyhow::bail!(
+                        "Codex {method} 连接关闭（进程状态 {}）",
+                        exit.and_then(|s| s.code())
+                            .map(|n| format!("0x{:08x}", n as u32))
+                            .unwrap_or_else(|| "运行中".into())
+                    );
+                }
+            };
             if reply["id"].as_u64() == Some(id) {
                 ensure!(
                     reply.get("error").is_none(),
-                    "Codex 账户不可用，请检查 CLI 登录"
+                    "Codex {method} 请求失败（{}）：{}",
+                    reply["error"]["code"],
+                    reply["error"]["message"]
+                        .as_str()
+                        .unwrap_or("账户连接不可用")
+                        .chars()
+                        .take(240)
+                        .collect::<String>()
                 );
                 return Ok(reply["result"].clone());
             }
