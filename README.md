@@ -6,13 +6,13 @@
 
 | 插件 | ID | 版本 |
 | --- | --- | --- |
-| Schedule Calendar（日程、农历、地区与天气） | `com.emssion.schedule-calendar` | 0.2.0 |
-| Everything Search（已安装软件优先搜索） | `com.emssion.everything-search` | 0.2.0 |
-| Agent Usage（订阅额度与手动重置余额） | `com.emssion.agent-usage` | 0.2.0 |
+| Schedule Calendar（日程、农历、地区与天气） | `com.emssion.schedule-calendar` | 1.0.0 |
+| Everything Search（已安装软件优先搜索） | `com.emssion.everything-search` | 1.0.0 |
+| Agent Usage（订阅额度与手动重置余额） | `com.emssion.agent-usage` | 1.0.0 |
 
-在 Ultra Bar“设置 → 插件中心 → 官方插件库”按需安装，或下载 Release 中的 `.ubplugin` 单独安装。0.2.0 插件需要 Ultra Bar 0.2.0 及以上。官方源身份固定为 GitHub repository id `1452116417`，插件身份和更新使用各自反向域名 ID 与 SemVer。
+在 Ultra Bar“设置 → 插件中心 → 官方插件库”按需安装，或下载 Release 中的 `.ubplugin` 单独安装。1.0.0 插件需要 Ultra Bar 1.x。官方源身份固定为 GitHub repository id `1452116417`，插件身份和更新使用各自反向域名 ID 与 SemVer。
 
-推送 `<插件ID>/v<版本>` tag 触发测试、release 编译、哈希包与目录生成，再发布 GitHub Release；`sdk-revision.txt` 固定 SDK 的完整提交，避免相同 tag 随主分支变化得到不同构建。已发布产物不可覆盖，变更请升版本。
+push main 自动对比各插件版本与已成功发布的包，只测试、构建版本升级的插件，其余复用原下载地址和校验值。`sdk-revision.txt` 固定 SDK 的完整提交。版本未升级的源码变更不会发布；已发布产物不可覆盖。
 
 ## 最小插件
 
@@ -72,18 +72,19 @@ API v1 的动作白名单：`none`、`start`、`notifications`、`settings`。�
 
 开发时从主仓库执行 `pwsh.exe -NoLogo -NoProfile -File ./dev.ps1`。单独构建原生插件可用 `-Task PluginBuild`，`-Task Check/Test/Clippy` 也会检查原生插件。重新启动新版 runner 后，插件 Rust 源码保存会触发受限构建；Rune 配置仍直接热重载。
 
-## 打 tag 发布
+## 独立版本与自动市场发布
 
-当前官方插件库为本仓库 `adoin/ultra-bar-plugins`，GitHub 仓库 ID `1452116417`。Ultra Bar 从 GitHub Releases 读取 `plugin-catalog.json` 和 `.ubplugin` 资产，按插件 ID 选最新兼容稳定版本，不把源代码目录当成线上插件目录。
+当前官方插件库为本仓库 `adoin/ultra-bar-plugins`，GitHub 仓库 ID `1452116417`。新客户端读取完整市场快照 `plugin-market.json`（schema 2），按资产 ID、原 URL、SHA-256 引用各插件自己的不可变 Release 包。旧客户端继续读取单包的 `plugin-catalog.json`（schema 1）。
 
 1. 修改 `plugin.json.version`；原生插件同步修改 Cargo.toml 的版本，提交 Cargo.lock。
-2. 将插件源码和工作流推送到 main；首次发布前，主程序仓库也需要推送 `crates/native-ui` 等 SDK 代码。
-3. 在插件仓库创建并推送 `com.emssion.schedule-calendar/v0.1.0` 这样的 tag。
-4. `Release plugin` 工作流测试、构建 release 二进制、生成包和 SHA-256、上传目录资产并创建 GitHub Release。带预发布版本的 tag 标记为 prerelease，默认目录不展示。
+2. 更新共享 SDK 时，先提交并推送主程序代码，再将 `sdk-revision.txt` 指向那个完整提交；需要采用新 SDK 的插件各自升版本。
+3. 提交并 push main。`Publish plugin market` 自动生成构建清单，只有新插件或版本升级者进入 Windows 构建任务。无版本变化时整个构建任务跳过。
+4. 包通过测试后，自动创建 `<ID>/v<版本>` Release/tag；最后发布 `market/<commit>` 完整目录快照。没有升级的插件继续引用历史包，无需重传。
 
 ```powershell
-git tag com.emssion.schedule-calendar/v0.1.0
-git push origin com.emssion.schedule-calendar/v0.1.0
+git add schedule-calendar/plugin.json schedule-calendar/Cargo.toml schedule-calendar/Cargo.lock
+git commit -m "Release Schedule Calendar 1.0.1"
+git push origin main
 ```
 
 本地正式打包（同样限制 Rust 构建资源）：
@@ -94,11 +95,11 @@ pwsh.exe -NoLogo -NoProfile -File ./scripts/package-plugin.ps1 -PluginId com.ems
 
 输出：`dist/<ID>--<版本>--windows-x86_64.ubplugin`、对应 `.sha256`、`plugin-catalog.json`。调试验证使用 `-DebugBuild`，输出隔离在 `target/package-debug` 或明确指定的测试目录；不用于正式发布。
 
-工作流从主仓库 main 获取 SDK，包内记录实际 SDK 提交和插件源提交。已发布 Release 不覆盖；修复后升级版本并新建 tag。协议和来源切换规则见主仓库 `docs/plugin-ecosystem.md`。
+工作流从主仓库的锁定提交获取 SDK，包内记录 SDK 与插件源码提交。源码改变但未升版本会提醒并复用旧包；降级和 Cargo 版本不一致会拒绝发布。单包成功但市场发布失败时，重跑复用该包；不覆盖已发布版本。每个 Actions 工作流保留最近 3 次记录和构建产物，Release 包独立保留。`Release plugin` 仍可手动触发作构建预检。协议和来源切换规则见主仓库 `docs/plugin-ecosystem.md`。
 
 ## 热重载
 
-API v3 提供受宿主管理的后台服务，以及 `leading`、`tray` 槽位。现有插件不需要迁移。详见主仓库 `docs/plugin-services.md` 与共享 `crates/plugin-sdk`／`crates/plugin-ui`；新增的 [Everything Search](everything-search/README.md) 复用现有索引，[Agent Usage](agent-usage/README.md) 监测 Codex／Claude Code 订阅额度。对应 tag 为 `com.emssion.everything-search/v0.1.0`、`com.emssion.agent-usage/v0.1.0`。发布前主仓库也需包含这两个 SDK crate。
+API v3 提供受宿主管理的后台服务，以及 `leading`、`tray` 槽位。现有插件不需要迁移。详见主仓库 `docs/plugin-services.md` 与共享 `crates/plugin-sdk`／`crates/plugin-ui`；[Everything Search](everything-search/README.md) 复用现有索引，[Agent Usage](agent-usage/README.md) 监测各 Agent 的订阅额度及可用统计。各插件独立维护版本，使用锁定提交中的共享 SDK。
 
 原生面板使用共享 SDK 的 `ultra_bar_native_ui::theme`：入口调用 `init_from_env()` 读取宿主传入的 `ULTRA_BAR_ACCENT`（`#RRGGBB`），绘制时读取 `palette()`，窗口过程先调用 `handle_message(hwnd, message, wparam)` 处理即时主色更新。`Palette` 字段是 GDI COLORREF，`accent_rgb()` / `Hsl::rgb()` 则为 RGB。激活与选中颜色保持主色 H，任务材质可使用 `theme::relief()` 获取与主色同 H、低饱和度和相对明暗的浮起/凹陷调色；共享左上光源，配合外阴影与内阴影形成深度。背景/字段画刷是 SDK 借用的动态资源，不要缓存到 `WNDCLASS` 或自行销毁；应在擦除与控件绘制消息中获取。宿主不为换色关闭编辑器。
 

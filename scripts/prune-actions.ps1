@@ -1,5 +1,5 @@
 [CmdletBinding()]
-param([int]$Keep = 3, [string[]]$Workflow = @('release-plugin.yml', 'actions-retention.yml'), [switch]$DryRun)
+param([int]$Keep = 3, [string[]]$Workflow = @('release-plugin.yml', 'publish-market.yml', 'actions-retention.yml'), [switch]$DryRun)
 $ErrorActionPreference = 'Stop'
 if ($Keep -lt 1) { throw 'Keep must be positive.' }
 $repo = $env:GITHUB_REPOSITORY

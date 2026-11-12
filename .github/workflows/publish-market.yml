@@ -1,0 +1,103 @@
+name: Publish plugin market
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: plugin-market
+  cancel-in-progress: false
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      has_builds: ${{ steps.plan.outputs.has_builds }}
+      matrix: ${{ steps.plan.outputs.matrix }}
+      sdk_revision: ${{ steps.plan.outputs.sdk_revision }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Test version-driven planning
+        shell: pwsh
+        run: ./scripts/test-market.ps1 -TestRoot '${{ runner.temp }}/market-tests'
+      - name: Compare manifests with published packages
+        id: plan
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: ./scripts/plan-market.ps1 -Repository '${{ github.repository }}'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: market-plan
+          path: target/market/plan.json
+          retention-days: 90
+          if-no-files-found: error
+  build:
+    needs: plan
+    if: needs.plan.outputs.has_builds == 'true'
+    runs-on: windows-2025
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: ultra-bar-plugins
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: adoin/ultra-bar
+          path: ultra-bar
+          ref: ${{ needs.plan.outputs.sdk_revision }}
+          persist-credentials: false
+      - name: Install pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.96.0'
+      - name: Test selected plugin
+        shell: pwsh
+        env:
+          PLUGIN_DIRECTORY: ${{ matrix.directory }}
+        run: |
+          $cargo = Join-Path 'ultra-bar-plugins' "$env:PLUGIN_DIRECTORY/Cargo.toml"
+          if (Test-Path -LiteralPath $cargo) {
+            cargo test --locked --manifest-path $cargo --jobs 1
+            if ($LASTEXITCODE) { throw 'Plugin tests failed' }
+          }
+      - name: Package selected plugin
+        shell: pwsh
+        env:
+          PLUGIN_ID: ${{ matrix.id }}
+          RELEASE_TAG: ${{ matrix.tag }}
+        run: ./ultra-bar-plugins/scripts/package-plugin.ps1 -PluginId $env:PLUGIN_ID -Tag $env:RELEASE_TAG -OutputDirectory (Join-Path $PWD 'release-output')
+      - uses: actions/upload-artifact@v4
+        with:
+          name: plugin-${{ matrix.id }}
+          path: release-output/*
+          retention-days: 90
+          if-no-files-found: error
+      - name: Publish immutable plugin version
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PLUGIN_ID: ${{ matrix.id }}
+        run: ./ultra-bar-plugins/scripts/publish-plugin.ps1 -Repository '${{ github.repository }}' -PluginId $env:PLUGIN_ID -Revision '${{ github.sha }}' -PackageDirectory release-output
+  publish:
+    needs: [plan, build]
+    if: always() && needs.plan.result == 'success' && (needs.build.result == 'success' || needs.build.result == 'skipped')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: market-plan
+          path: target/market
+      - name: Publish complete market catalog
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: ./scripts/publish-market.ps1 -Repository '${{ github.repository }}' -PlanFile target/market/plan.json

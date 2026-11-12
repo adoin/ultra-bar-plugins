@@ -1,7 +1,7 @@
 name: Keep three build runs
 on:
   workflow_run:
-    workflows: ['Release plugin']
+    workflows: ['Release plugin', 'Publish plugin market']
     types: [completed]
   workflow_dispatch:
 permissions:
