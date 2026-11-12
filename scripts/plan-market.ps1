@@ -32,3 +32,5 @@ if ($env:GITHUB_OUTPUT) {
     "matrix=$(@{include=@($plan.builds)} | ConvertTo-Json -Depth 8 -Compress)" >> $env:GITHUB_OUTPUT
     "sdk_revision=$sdk" >> $env:GITHUB_OUTPUT
 }
+# git diff uses 1 for an expected source change; that warning is not a plan failure.
+exit 0
