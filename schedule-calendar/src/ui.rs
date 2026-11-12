@@ -405,7 +405,7 @@ pub unsafe fn run(
         if smoke && let Ok(dpi) = std::env::var("ULTRA_BAR_CALENDAR_SMOKE_DPI") {
             state.dpi = dpi.parse::<i32>()?.clamp(96, 192);
         }
-        state.font = CreateFontW(
+        state.font = ultra_bar_native_ui::fonts::create_font(
             -13 * state.dpi / 96,
             0,
             0,
@@ -422,7 +422,7 @@ pub unsafe fn run(
             wide("Segoe UI").as_ptr(),
         );
         state.glass = ultra_bar_native_ui::enable_glass(hwnd);
-        state.icon_font = CreateFontW(
+        state.icon_font = ultra_bar_native_ui::fonts::create_font(
             -19 * state.dpi / 96,
             0,
             0,
@@ -482,10 +482,10 @@ pub unsafe fn run(
             CloseHandle(state.parent);
         }
         if !state.font.is_null() {
-            DeleteObject(state.font);
+            ultra_bar_native_ui::fonts::delete_object(state.font);
         }
         if !state.icon_font.is_null() {
-            DeleteObject(state.icon_font);
+            ultra_bar_native_ui::fonts::delete_object(state.icon_font);
         }
         Ok(())
     }
@@ -929,7 +929,7 @@ unsafe fn round_fill(dc: HDC, rect: &RECT, color: u32, radius: i32) {
         );
         SelectObject(dc, old_pen);
         SelectObject(dc, old_brush);
-        DeleteObject(brush);
+        ultra_bar_native_ui::fonts::delete_object(brush);
     }
 }
 unsafe fn paint(state: &mut App) {
@@ -946,7 +946,7 @@ unsafe fn paint(state: &mut App) {
         let old = SelectObject(dc, state.font);
         let brush = CreateSolidBrush(ultra_bar_native_ui::theme::palette().background);
         FillRect(dc, &area, brush);
-        DeleteObject(brush);
+        ultra_bar_native_ui::fonts::delete_object(brush);
         SetBkMode(dc, TRANSPARENT as _);
         let unit = |n: i32| n * state.dpi / 96;
         let text = |value: &str, mut rect: RECT, color: u32| {

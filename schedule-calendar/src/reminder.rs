@@ -121,7 +121,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, message: u32, w: WPARAM, l: LPARAM
                 let old = SelectObject(dc, app.font);
                 let brush = CreateSolidBrush(ultra_bar_native_ui::BACKGROUND_BRUSH);
                 FillRect(dc, &area, brush);
-                DeleteObject(brush);
+                ultra_bar_native_ui::fonts::delete_object(brush);
                 SetBkMode(dc, TRANSPARENT as _);
                 SetTextColor(dc, 0x00ffffff);
                 if let Some(pending) = app
@@ -173,7 +173,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, message: u32, w: WPARAM, l: LPARAM
                         };
                         let brush = CreateSolidBrush(ultra_bar_native_ui::HOVER_BRUSH);
                         FillRect(dc, &rect, brush);
-                        DeleteObject(brush);
+                        ultra_bar_native_ui::fonts::delete_object(brush);
                         DrawTextW(
                             dc,
                             wide(text).as_ptr(),
