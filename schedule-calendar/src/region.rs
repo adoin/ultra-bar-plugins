@@ -19,6 +19,8 @@ pub struct Config {
     pub host: String,
     pub fahrenheit: bool,
     pub clock_format: String,
+    pub notifications_enabled: bool,
+    pub notification_sound_enabled: bool,
 }
 impl Default for Config {
     fn default() -> Self {
@@ -32,6 +34,8 @@ impl Default for Config {
             host: String::new(),
             fahrenheit: false,
             clock_format: "MM-DD HH:mm".into(),
+            notifications_enabled: true,
+            notification_sound_enabled: true,
         }
     }
 }
@@ -88,6 +92,16 @@ impl Config {
                 &["仅时间", "并排展示", "轮播展示"],
             ),
             Field::choice("任务栏农历", usize::from(self.lunar), &["隐藏", "显示"]),
+            Field::choice(
+                "日程提醒",
+                usize::from(self.notifications_enabled),
+                &["关闭", "开启"],
+            ),
+            Field::choice(
+                "提醒声音",
+                usize::from(self.notification_sound_enabled),
+                &["关闭", "开启"],
+            ),
             Field::text("时区（IANA）", &self.timezone),
             Field::choice(
                 "每周第一天",
@@ -118,21 +132,23 @@ impl Config {
         ]
     }
     pub fn parse(values: &[String]) -> Result<Self> {
-        ensure!(values.len() == 11, "设置不完整");
+        ensure!(values.len() == 13, "设置不完整");
         let config = Self {
-            timezone: values[3].trim().into(),
-            sunday_first: values[4] == "1",
+            timezone: values[5].trim().into(),
+            sunday_first: values[6] == "1",
             lunar: values[2] == "1",
             display: values[1].parse::<usize>()?.min(2),
-            city: values[5].trim().into(),
-            provider: values[7].parse::<usize>()?.min(2),
-            host: values[8]
+            city: values[7].trim().into(),
+            provider: values[9].parse::<usize>()?.min(2),
+            host: values[10]
                 .trim()
                 .trim_end_matches('/')
                 .trim_start_matches("https://")
                 .into(),
-            fahrenheit: values[6] == "1",
+            fahrenheit: values[8] == "1",
             clock_format: values[0].trim().into(),
+            notifications_enabled: values[3] == "1",
+            notification_sound_enabled: values[4] == "1",
         };
         ensure!(
             config.timezone.parse::<chrono_tz::Tz>().is_ok(),
@@ -315,25 +331,33 @@ mod tests {
             fahrenheit: true,
             provider: 2,
             host: "test.qweatherapi.com".into(),
+            notifications_enabled: true,
+            notification_sound_enabled: false,
         };
         let fields = config.fields();
         assert_eq!(fields[0].label, "任务栏时间格式");
-        assert!(matches!(fields[9].kind, ultra_bar_native_ui::form::Kind::Secret));
+        assert!(matches!(
+            fields[11].kind,
+            ultra_bar_native_ui::form::Kind::Secret
+        ));
         let mut values: Vec<_> = fields.into_iter().map(|field| field.value).collect();
-        values[9] = "test-secret-placeholder".into();
+        values[11] = "test-secret-placeholder".into();
         let parsed = Config::parse(&values).unwrap();
-        assert_eq!(serde_json::to_value(parsed).unwrap(), serde_json::to_value(config).unwrap());
+        assert_eq!(
+            serde_json::to_value(parsed).unwrap(),
+            serde_json::to_value(config).unwrap()
+        );
     }
     #[test]
     fn settings_validate_timezone_and_credential_destination() {
         let fields = Config::default().fields();
         let mut v: Vec<_> = fields.into_iter().map(|f| f.value).collect();
         assert!(Config::parse(&v).is_ok());
-        v[8] = "https://evil.test".into();
+        v[10] = "https://evil.test".into();
         assert!(Config::parse(&v).is_err());
-        v[8] = "abc.qweatherapi.com".into();
+        v[10] = "abc.qweatherapi.com".into();
         assert!(Config::parse(&v).is_ok());
-        v[3] = "wrong".into();
+        v[5] = "wrong".into();
         assert!(Config::parse(&v).is_err());
     }
 }

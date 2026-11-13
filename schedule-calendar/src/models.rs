@@ -29,6 +29,8 @@ pub struct CalendarEvent {
     #[serde(default)]
     pub completed: bool,
     #[serde(default)]
+    pub completed_dates: Vec<chrono::NaiveDate>,
+    #[serde(default)]
     pub deleted: bool,
     #[serde(default)]
     pub version: i64,
@@ -50,6 +52,25 @@ fn default_reminders() -> Vec<i64> {
 }
 
 impl CalendarEvent {
+    pub fn completed_on(&self, date: chrono::NaiveDate) -> bool {
+        if self.recurrence_rule.is_empty() {
+            self.completed
+        } else {
+            self.completed_dates.contains(&date)
+        }
+    }
+    pub fn set_completed_on(&mut self, date: chrono::NaiveDate, completed: bool) {
+        if self.recurrence_rule.is_empty() {
+            self.completed = completed;
+        } else {
+            self.completed = false;
+            self.completed_dates.retain(|day| *day != date);
+            if completed {
+                self.completed_dates.push(date);
+                self.completed_dates.sort_unstable();
+            }
+        }
+    }
     pub fn draft(start_at: DateTime<Utc>, end_at: DateTime<Utc>) -> Self {
         Self {
             id: uuid::Uuid::new_v4().to_string(),
@@ -66,6 +87,7 @@ impl CalendarEvent {
             reminder_minutes: default_reminders(),
             force_reminder: false,
             completed: false,
+            completed_dates: Vec::new(),
             deleted: false,
             version: 0,
             updated_seq: 0,

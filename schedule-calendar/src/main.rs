@@ -5,6 +5,7 @@ mod editor;
 mod engine;
 mod http;
 mod models;
+mod notifications;
 mod region;
 mod reminder;
 mod ui;
@@ -68,7 +69,7 @@ fn run_main() -> bool {
         if std::env::args().any(|arg| {
             matches!(
                 arg.as_str(),
-                "--smoke-test" | "--region-smoke" | "--probe-weather"
+                "--smoke-test" | "--region-smoke" | "--probe-weather" | "--notification-test"
             )
         }) {
             eprintln!("{error:#}");
@@ -88,6 +89,31 @@ fn run_main() -> bool {
 }
 fn run() -> Result<()> {
     let args: Vec<_> = std::env::args().collect();
+    if args.get(1).is_some_and(|s| s == "--notification-test") {
+        let root = std::path::Path::new(args.get(2).context("Missing plugin root")?);
+        let output = std::path::Path::new(args.get(3).context("Missing result file")?);
+        anyhow::ensure!(
+            root.is_absolute() && output.is_absolute(),
+            "测试路径必须为绝对路径"
+        );
+        let now = chrono::Utc::now();
+        let mut event = models::CalendarEvent::draft(now, now + chrono::Duration::minutes(1));
+        event.title = "Ultra Bar 日程提醒测试".into();
+        let pending = engine::Pending {
+            key: format!("test:{}", event.id),
+            event,
+            occurrence: now,
+            offset: 0,
+        };
+        let result = notifications::show(&pending, root, false);
+        std::fs::write(
+            output,
+            serde_json::to_vec_pretty(
+                &serde_json::json!({"accepted":result.is_ok(),"error":result.as_ref().err().map(|e|format!("{e:#}"))}),
+            )?,
+        )?;
+        return result;
+    }
     if args.get(1).is_some_and(|s| s == "--region-smoke") {
         let directory = std::path::Path::new(args.get(2).context("Missing output directory")?);
         std::fs::create_dir_all(directory)?;

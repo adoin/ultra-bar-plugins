@@ -6,9 +6,9 @@
 
 | 插件 | ID | 版本 |
 | --- | --- | --- |
-| Schedule Calendar（日程、农历、地区与天气） | `com.emssion.schedule-calendar` | 1.0.0 |
-| Everything Search（已安装软件优先搜索） | `com.emssion.everything-search` | 1.0.0 |
-| Agent Usage（订阅额度与手动重置余额） | `com.emssion.agent-usage` | 1.0.0 |
+| Schedule Calendar（日程、农历、地区与天气） | `com.emssion.schedule-calendar` | 1.1.1 |
+| Everything Search（已安装软件优先搜索） | `com.emssion.everything-search` | 1.0.1 |
+| Agent Usage（订阅额度与手动重置余额） | `com.emssion.agent-usage` | 1.1.0 |
 
 在 Ultra Bar“设置 → 插件中心 → 官方插件库”按需安装，或下载 Release 中的 `.ubplugin` 单独安装。1.0.0 插件需要 Ultra Bar 1.x。官方源身份固定为 GitHub repository id `1452116417`，插件身份和更新使用各自反向域名 ID 与 SemVer。
 
@@ -69,6 +69,9 @@ API v1 的动作白名单：`none`、`start`、`notifications`、`settings`。�
 - 原生 Cargo 二进制名由 `panel.binary` 声明，与插件 ID 分离。主仓库 `dev.ps1` 会串行编译并写入 `.runtime/current.json`，exe 使用内容哈希目录，避免 Windows 文件占用妨碍更新。运行目录不提交到 Git。
 - 面板启动协议：`--plugin-root DIR --owner HWND --parent PID --show`；后台启动使用 `--background`。插件监测父进程并在任务栏退出后结束。`background` 用于本地提醒等明确的后台工作，不需要持续渲染。
 - 切换时钟入口只改变入口选择；已安装且声明后台运行的日历仍处理已保存的提醒。
+- 提醒由插件独立处理，无需运行 Schedule Manager。普通提醒使用 Windows 通知，支持网页链接和可选提示音；系统发送失败时保留队列并使用独立提醒窗。强制提醒保持置顶，直到手动确认，任务栏重启后恢复待处理队列。提醒和声音开关位于日历插件设置。
+- 循环日程的完成状态按发生日期记录；完成一次不停止后续循环。旧版整条完成标志会迁移到最后修改当天，迁移前在数据目录保存 `calendar.before-occurrence-completion.json`。单次日程仍使用整条完成状态。确认提醒只清除该提醒，不改变日程完成状态。
+- 触发窗口与 Schedule Manager 一致，允许 5 分钟内补发并按每次发生去重；更早的未入队提醒不会无限补发。入队、系统投递结果、提醒窗口与确认会写入宿主日志目录。
 
 开发时从主仓库执行 `pwsh.exe -NoLogo -NoProfile -File ./dev.ps1`。单独构建原生插件可用 `-Task PluginBuild`，`-Task Check/Test/Clippy` 也会检查原生插件。重新启动新版 runner 后，插件 Rust 源码保存会触发受限构建；Rune 配置仍直接热重载。
 

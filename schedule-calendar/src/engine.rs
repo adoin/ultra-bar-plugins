@@ -34,7 +34,7 @@ pub struct Repository {
 impl Repository {
     pub fn open(directory: &Path) -> Result<Self> {
         let path = directory.join("calendar.json");
-        let data: Data = if path.exists() {
+        let mut data: Data = if path.exists() {
             serde_json::from_slice(&std::fs::read(&path)?)?
         } else {
             Data::default()
@@ -42,6 +42,14 @@ impl Repository {
         ensure!(data.events.len() <= 10000, "日程数量过多");
         for event in &data.events {
             validate_event(event)?;
+        }
+        let mut migrated = 0;
+        for event in &mut data.events {
+            if event.completed && !event.recurrence_rule.is_empty() {
+                let day = event.updated_at.with_timezone(&timezone()).date_naive();
+                event.set_completed_on(day, true);
+                migrated += 1;
+            }
         }
         let mut repo = Self {
             data,
@@ -58,6 +66,30 @@ impl Repository {
             }
         }
         repo.refresh_holidays();
+        if migrated > 0 {
+            let events = &repo.data.events;
+            repo.data.pending.retain(|pending| {
+                events
+                    .iter()
+                    .find(|event| event.id == pending.event.id)
+                    .is_some_and(|event| {
+                        !event.deleted
+                            && !event.completed_on(
+                                pending.occurrence.with_timezone(&timezone()).date_naive(),
+                            )
+                    })
+            });
+            let backup = directory.join("calendar.before-occurrence-completion.json");
+            if !backup.exists() {
+                std::fs::copy(&repo.path, backup)?;
+            }
+            repo.save()?;
+            ultra_bar_native_ui::diagnostics::event(
+                "calendar",
+                "completion.migrated",
+                serde_json::json!({"events":migrated}),
+            );
+        }
         Ok(repo)
     }
     fn refresh_holidays(&mut self) {
@@ -73,11 +105,24 @@ impl Repository {
     }
     pub fn upsert(&mut self, event: CalendarEvent) -> Result<()> {
         let old = self.data.clone();
+        let updated = event.clone();
         if let Some(previous) = self.data.events.iter_mut().find(|item| item.id == event.id) {
             *previous = event;
         } else {
             self.data.events.push(event);
         }
+        self.data.pending.retain_mut(|pending| {
+            if pending.event.id != updated.id {
+                return true;
+            }
+            if updated.deleted
+                || updated.completed_on(pending.occurrence.with_timezone(&timezone()).date_naive())
+            {
+                return false;
+            }
+            pending.event = updated.clone();
+            true
+        });
         if let Err(error) = self.save() {
             self.data = old;
             return Err(error);
@@ -90,9 +135,9 @@ impl Repository {
         event.updated_at = Utc::now();
         self.upsert(event)
     }
-    pub fn complete(&mut self, id: &str) -> Result<()> {
+    pub fn complete_on(&mut self, id: &str, date: NaiveDate) -> Result<()> {
         let mut event = self.event(id).context("日程不存在")?.clone();
-        event.completed = !event.completed;
+        event.set_completed_on(date, !event.completed_on(date));
         event.updated_at = Utc::now();
         self.upsert(event)
     }
@@ -117,33 +162,48 @@ impl Repository {
     pub fn scan_reminders(&mut self, from: DateTime<Utc>, now: DateTime<Utc>) -> Result<bool> {
         let old = self.data.clone();
         let mut added = false;
+        // Same five-minute delivery grace as Schedule Manager, including restart
+        // and midnight crossings, without replaying an unlimited stale backlog.
+        let from = if from >= now {
+            now - Duration::minutes(5)
+        } else {
+            from.max(now - Duration::minutes(5))
+        };
         for event in &self.data.events {
-            if event.deleted || event.completed {
+            if event.deleted || (event.recurrence_rule.is_empty() && event.completed) {
                 continue;
             }
             for offset in &event.reminder_minutes {
-                let occurrence_date = (now + Duration::minutes(*offset))
+                let first = (from + Duration::minutes(*offset))
                     .with_timezone(&timezone())
                     .date_naive();
-                if !calendar::event_occurs_on(
-                    event,
-                    occurrence_date,
-                    self.holidays.get(&occurrence_date.to_string()),
-                ) {
-                    continue;
-                }
-                let occurrence = calendar::occurrence_start(event, occurrence_date)?;
-                let due = occurrence - Duration::minutes(*offset);
-                let key = format!("{}:{}:{}", event.id, occurrence.timestamp(), offset);
-                if due > from && due <= now && !self.data.fired.contains(&key) {
-                    self.data.fired.push(key.clone());
-                    self.data.pending.push(Pending {
-                        key,
-                        event: event.clone(),
-                        occurrence,
-                        offset: *offset,
-                    });
-                    added = true;
+                let last = (now + Duration::minutes(*offset))
+                    .with_timezone(&timezone())
+                    .date_naive();
+                for occurrence_date in first.iter_days().take_while(|date| *date <= last) {
+                    if !calendar::event_occurs_on(
+                        event,
+                        occurrence_date,
+                        self.holidays.get(&occurrence_date.to_string()),
+                    ) {
+                        continue;
+                    }
+                    if event.completed_on(occurrence_date) {
+                        continue;
+                    }
+                    let occurrence = calendar::occurrence_start(event, occurrence_date)?;
+                    let due = occurrence - Duration::minutes(*offset);
+                    let key = format!("{}:{}:{}", event.id, occurrence.timestamp(), offset);
+                    if due > from && due <= now && !self.data.fired.contains(&key) {
+                        self.data.fired.push(key.clone());
+                        self.data.pending.push(Pending {
+                            key,
+                            event: event.clone(),
+                            occurrence,
+                            offset: *offset,
+                        });
+                        added = true;
+                    }
                 }
             }
         }
@@ -154,6 +214,13 @@ impl Repository {
             self.data = old;
             return Err(error);
         }
+        if added {
+            ultra_bar_native_ui::diagnostics::event(
+                "calendar",
+                "reminder.queued",
+                serde_json::json!({"pending":self.data.pending.len(),"from":from,"now":now}),
+            );
+        }
         Ok(added)
     }
     pub fn acknowledge(&mut self, key: &str) -> Result<()> {
@@ -163,6 +230,11 @@ impl Repository {
             self.data = old;
             return Err(error);
         }
+        ultra_bar_native_ui::diagnostics::event(
+            "calendar",
+            "reminder.acknowledged",
+            serde_json::json!({"key":key}),
+        );
         Ok(())
     }
     pub fn import(&mut self, bytes: &[u8]) -> Result<usize> {
@@ -286,7 +358,16 @@ pub struct Draft {
     pub completed: bool,
 }
 impl Draft {
+    #[cfg(test)]
     pub fn build(self, previous: Option<&CalendarEvent>) -> Result<CalendarEvent> {
+        let date = self.date;
+        self.build_on(previous, date)
+    }
+    pub fn build_on(
+        self,
+        previous: Option<&CalendarEvent>,
+        completion_date: NaiveDate,
+    ) -> Result<CalendarEvent> {
         ensure!(!self.title.trim().is_empty(), "标题不能为空");
         ensure!(
             (1..=525600).contains(&self.duration),
@@ -352,7 +433,7 @@ impl Draft {
         event.reminder_minutes.sort_unstable();
         event.reminder_minutes.dedup();
         event.force_reminder = self.force;
-        event.completed = self.completed;
+        event.set_completed_on(completion_date, self.completed);
         event.updated_at = Utc::now();
         Ok(event)
     }
@@ -382,6 +463,93 @@ mod tests {
         }
     }
     #[test]
+    fn recurring_completion_only_skips_one_occurrence_and_legacy_completion_migrates() {
+        let fixture = Fixture::new();
+        let first = timezone()
+            .with_ymd_and_hms(2026, 11, 12, 11, 25, 0)
+            .unwrap()
+            .with_timezone(&Utc);
+        let day = first.with_timezone(&timezone()).date_naive();
+        let mut event = CalendarEvent::draft(first, first + Duration::minutes(1));
+        event.title = "循环提醒验证".into();
+        event.recurrence_rule = "DAILY".into();
+        event.completed = true;
+        event.updated_at = first;
+        let data = Data {
+            events: vec![event.clone()],
+            ..Default::default()
+        };
+        std::fs::write(
+            fixture.0.join("calendar.json"),
+            serde_json::to_vec(&data).unwrap(),
+        )
+        .unwrap();
+        let mut repo = Repository::open(&fixture.0).unwrap();
+        let migrated = repo.event(&event.id).unwrap();
+        assert!(!migrated.completed);
+        assert!(migrated.completed_on(day));
+        assert!(
+            fixture
+                .0
+                .join("calendar.before-occurrence-completion.json")
+                .exists()
+        );
+        assert!(
+            !repo
+                .scan_reminders(first - Duration::minutes(1), first)
+                .unwrap()
+        );
+        let next = first + Duration::days(1);
+        assert!(
+            repo.scan_reminders(next - Duration::minutes(1), next)
+                .unwrap()
+        );
+        assert_eq!(repo.data.pending.len(), 1);
+        repo.complete_on(&event.id, day.succ_opt().unwrap())
+            .unwrap();
+        assert!(repo.data.pending.is_empty());
+        let restored = Repository::open(&fixture.0).unwrap();
+        assert_eq!(restored.event(&event.id).unwrap().completed_dates.len(), 2);
+        let third = first + Duration::days(2);
+        assert!(
+            Repository::open(&fixture.0)
+                .unwrap()
+                .scan_reminders(third - Duration::minutes(1), third)
+                .unwrap()
+        );
+        std::fs::remove_file(fixture.0.join("calendar.before-occurrence-completion.json")).unwrap();
+    }
+    #[test]
+    fn reminder_grace_recovers_after_restart_and_across_midnight_without_stale_replay() {
+        let fixture = Fixture::new();
+        let due = timezone()
+            .with_ymd_and_hms(2026, 11, 12, 23, 59, 0)
+            .unwrap()
+            .with_timezone(&Utc);
+        let mut event = CalendarEvent::draft(due, due + Duration::minutes(1));
+        event.title = "午夜提醒验证".into();
+        event.recurrence_rule = "DAILY".into();
+        let mut repo = Repository::open(&fixture.0).unwrap();
+        repo.upsert(event).unwrap();
+        let now = due + Duration::minutes(2);
+        assert!(
+            repo.scan_reminders(now - Duration::minutes(5), now)
+                .unwrap()
+        );
+        assert_eq!(repo.data.pending[0].occurrence, due);
+        assert!(
+            !Repository::open(&fixture.0)
+                .unwrap()
+                .scan_reminders(now - Duration::minutes(5), now)
+                .unwrap()
+        );
+        assert!(
+            !repo
+                .scan_reminders(due - Duration::days(1), due + Duration::minutes(10))
+                .unwrap()
+        );
+    }
+    #[test]
     fn reminders_deduplicate_survive_restart_and_acknowledge_without_completing_event() {
         let fixture = Fixture::new();
         let mut repo = Repository::open(&fixture.0).unwrap();
@@ -408,7 +576,9 @@ mod tests {
         let key = restored.data.pending[0].key.clone();
         restored.acknowledge(&key).unwrap();
         assert!(!restored.event(&event.id).unwrap().completed);
-        restored.complete(&event.id).unwrap();
+        restored
+            .complete_on(&event.id, now.with_timezone(&timezone()).date_naive())
+            .unwrap();
         assert!(
             Repository::open(&fixture.0)
                 .unwrap()

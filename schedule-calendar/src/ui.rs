@@ -26,7 +26,7 @@ enum Action {
     Next,
     View(usize),
     Day(NaiveDate),
-    Event(String),
+    Event(String, NaiveDate),
     New,
     Edit,
     Complete,
@@ -64,19 +64,20 @@ pub struct App {
     pub editor: Option<Box<crate::editor::Editor>>,
     pub reminder: Option<Box<crate::reminder::Reminder>>,
     config: Configuration,
-    root: PathBuf,
+    pub(crate) root: PathBuf,
     watcher: Option<notify::RecommendedWatcher>,
     hits: Vec<Hit>,
     tips: Option<Tooltips>,
     glass: bool,
     scroll: usize,
     last_check: chrono::DateTime<Utc>,
+    next_delivery: std::time::Instant,
     last_minute: i64,
     pub smoke: bool,
 }
 fn apply_region(state: &mut App, values: &[String]) -> Result<()> {
     let config = crate::region::Config::parse(values)?;
-    crate::region::save_key(&values[9])?;
+    crate::region::save_key(&values[11])?;
     crate::region::save(&state.region_dir, &config)?;
     crate::region::set_timezone(&config.timezone)?;
     state.region = config;
@@ -84,7 +85,7 @@ fn apply_region(state: &mut App, values: &[String]) -> Result<()> {
         let _ = worker
             .send
             .try_send(crate::region::Request::Configure(state.region.clone()));
-        if !values[9].trim().is_empty() {
+        if !values[11].trim().is_empty() {
             let _ = worker.send.try_send(crate::region::Request::Refresh);
         }
     }
@@ -348,7 +349,8 @@ pub unsafe fn run(
             tips: None,
             glass: false,
             scroll: 0,
-            last_check: Utc::now() - Duration::seconds(60),
+            last_check: Utc::now() - Duration::minutes(5),
+            next_delivery: std::time::Instant::now(),
             last_minute: 0,
             smoke,
         });
@@ -456,6 +458,46 @@ pub unsafe fn run(
                 paint(&mut state);
             }
             crate::editor::smoke(&mut state)?;
+            let now = Utc::now();
+            let mut reminder_event =
+                CalendarEvent::draft(now - Duration::seconds(1), now + Duration::minutes(1));
+            reminder_event.title = "提醒链路验证".into();
+            reminder_event.force_reminder = true;
+            let reminder_id = reminder_event.id.clone();
+            state.repo.upsert(reminder_event)?;
+            anyhow::ensure!(
+                state.repo.scan_reminders(now - Duration::minutes(5), now)?,
+                "测试提醒未入队"
+            );
+            crate::reminder::show(&mut state);
+            let reminder = state.reminder.as_ref().context("提醒窗口未创建")?.hwnd;
+            UpdateWindow(reminder);
+            anyhow::ensure!(
+                IsWindowVisible(reminder) != 0 && GetWindow(reminder, GW_OWNER).is_null(),
+                "提醒窗口被日历弹层的可见性约束"
+            );
+            ShowWindow(hwnd, SW_HIDE);
+            anyhow::ensure!(IsWindowVisible(reminder) != 0, "隐藏日历时提醒也消失了");
+            SendMessageW(reminder, WM_CLOSE, 0, 0);
+            anyhow::ensure!(
+                IsWindow(reminder) != 0 && !state.repo.data.pending.is_empty(),
+                "强制提醒被关闭而没有确认"
+            );
+            SendMessageW(
+                reminder,
+                WM_LBUTTONUP,
+                0,
+                (((190 * state.dpi / 96 - 20) << 16) | (260 * state.dpi / 96)) as isize,
+            );
+            anyhow::ensure!(
+                IsWindow(reminder) == 0 && state.repo.data.pending.is_empty(),
+                "确认后没有清除提醒"
+            );
+            anyhow::ensure!(
+                !state.repo.event(&reminder_id).unwrap().completed,
+                "确认提醒错误地完成了日程"
+            );
+            std::fs::write(state.region_dir.parent().unwrap().join("reminder-result.json"), b"{\"queued\":true,\"visible_without_calendar\":true,\"forced_until_acknowledged\":true,\"acknowledged_without_completing_event\":true}")?;
             eprintln!(
                 "calendar smoke: 4 views rendered; 6 declarative schedule editor schemas validated; no keyboard/mouse input"
             );
@@ -528,7 +570,7 @@ unsafe fn show_panel(state: &mut App) {
         InvalidateRect(state.hwnd, null(), 0);
     }
 }
-pub fn label(event: &CalendarEvent) -> String {
+pub fn label(event: &CalendarEvent, date: NaiveDate) -> String {
     let time = if event.all_day {
         "全天".into()
     } else {
@@ -541,7 +583,7 @@ pub fn label(event: &CalendarEvent) -> String {
     format!(
         "{} {}{} · {}",
         time,
-        if event.completed { "✓ " } else { "" },
+        if event.completed_on(date) { "✓ " } else { "" },
         event.title,
         calendar::schedule_kind(event).label()
     )
@@ -736,14 +778,53 @@ unsafe extern "system" fn wndproc(hwnd: HWND, message: u32, w: WPARAM, l: LPARAM
                 }
                 if now.timestamp() / 60 != state.last_minute {
                     state.last_minute = now.timestamp() / 60;
-                    let result = state.repo.scan_reminders(state.last_check, now).map(|_| ());
-                    error(hwnd, result);
-                    state.last_check = now;
+                    if state.region.notifications_enabled {
+                        match state.repo.scan_reminders(state.last_check, now) {
+                            Ok(_) => state.last_check = now,
+                            Err(cause) => ultra_bar_native_ui::diagnostics::event(
+                                "calendar",
+                                "reminder.scan_failed",
+                                serde_json::json!({"error":format!("{cause:#}")}),
+                            ),
+                        }
+                    } else {
+                        state.last_check = now;
+                    }
                     if IsWindowVisible(hwnd) != 0 {
                         InvalidateRect(hwnd, null(), 0);
                     }
                 }
-                if !state.repo.data.pending.is_empty()
+                if state.region.notifications_enabled
+                    && std::time::Instant::now() >= state.next_delivery
+                {
+                    state.next_delivery =
+                        std::time::Instant::now() + std::time::Duration::from_secs(30);
+                    let ordinary: Vec<_> = state
+                        .repo
+                        .data
+                        .pending
+                        .iter()
+                        .filter(|p| !p.event.force_reminder)
+                        .cloned()
+                        .collect();
+                    for pending in ordinary {
+                        let result = crate::notifications::show(
+                            &pending,
+                            &state.root,
+                            state.region.notification_sound_enabled,
+                        );
+                        ultra_bar_native_ui::diagnostics::event(
+                            "calendar",
+                            "reminder.delivery",
+                            serde_json::json!({"key":pending.key,"channel":"windows_toast","ok":result.is_ok(),"error":result.as_ref().err().map(|e|format!("{e:#}"))}),
+                        );
+                        if result.is_ok() {
+                            error(hwnd, state.repo.acknowledge(&pending.key));
+                        }
+                    }
+                }
+                if state.region.notifications_enabled
+                    && !state.repo.data.pending.is_empty()
                     && state
                         .reminder
                         .as_ref()
@@ -769,6 +850,11 @@ unsafe extern "system" fn wndproc(hwnd: HWND, message: u32, w: WPARAM, l: LPARAM
                 0
             }
             WM_DESTROY => {
+                if let Some(reminder) = &state.reminder
+                    && IsWindow(reminder.hwnd) != 0
+                {
+                    DestroyWindow(reminder.hwnd);
+                }
                 KillTimer(hwnd, 1);
                 KillTimer(hwnd, 2);
                 PostQuitMessage(0);
@@ -844,7 +930,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, message: u32, w: WPARAM, l: LPARAM
                                 crate::editor::open(state, None);
                             }
                         }
-                        Action::Event(id) => {
+                        Action::Event(id, date) => {
+                            state.selected = date;
                             state.selected_event = Some(id.clone());
                             if message == WM_LBUTTONDBLCLK {
                                 crate::editor::open(state, Some(id));
@@ -861,7 +948,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, message: u32, w: WPARAM, l: LPARAM
                         }
                         Action::Complete => {
                             if let Some(id) = &state.selected_event {
-                                let result = state.repo.complete(id);
+                                let result = state.repo.complete_on(id, state.selected);
                                 error(hwnd, result);
                             }
                         }
@@ -1199,17 +1286,52 @@ unsafe fn paint(state: &mut App) {
             list_top = unit(90);
         }
         let mut events: Vec<_> = if state.view <= 1 {
-            state.repo.occurrences(state.selected)
+            state
+                .repo
+                .occurrences(state.selected)
+                .into_iter()
+                .map(|event| (event, state.selected))
+                .collect()
+        } else if state.view == 3 {
+            state
+                .repo
+                .data
+                .events
+                .iter()
+                .filter(|event| !event.deleted)
+                .flat_map(|event| {
+                    let dates = if event.recurrence_rule.is_empty() {
+                        if event.completed {
+                            vec![event.start_at.with_timezone(&timezone()).date_naive()]
+                        } else {
+                            vec![]
+                        }
+                    } else {
+                        event.completed_dates.clone()
+                    };
+                    dates.into_iter().map(move |date| (event, date))
+                })
+                .collect()
         } else {
             state
                 .repo
                 .data
                 .events
                 .iter()
-                .filter(|event| !event.deleted && (state.view != 3 || event.completed))
+                .filter(|event| !event.deleted)
+                .map(|event| {
+                    (
+                        event,
+                        if event.recurrence_rule.is_empty() {
+                            event.start_at.with_timezone(&timezone()).date_naive()
+                        } else {
+                            state.selected
+                        },
+                    )
+                })
                 .collect()
         };
-        events.sort_by_key(|event| event.start_at);
+        events.sort_by_key(|(event, date)| (*date, event.start_at));
         let start_y = list_top + unit(28);
         let row_height = unit(28);
         let capacity = ((area.bottom - unit(56) - start_y) / row_height).max(1) as usize;
@@ -1226,14 +1348,15 @@ unsafe fn paint(state: &mut App) {
                 ultra_bar_native_ui::theme::palette().muted,
             );
         }
-        for (position, event) in events.iter().skip(state.scroll).take(capacity).enumerate() {
+        for (position, (event, date)) in events.iter().skip(state.scroll).take(capacity).enumerate()
+        {
             let rect = RECT {
                 left: unit(12),
                 top: start_y + position as i32 * row_height,
                 right: area.right - unit(12),
                 bottom: start_y + (position as i32 + 1) * row_height - unit(2),
             };
-            if state.selected_event.as_deref() == Some(&event.id) {
+            if state.selected_event.as_deref() == Some(&event.id) && state.selected == *date {
                 round_fill(
                     dc,
                     &rect,
@@ -1242,13 +1365,9 @@ unsafe fn paint(state: &mut App) {
                 );
             }
             let value = if state.view >= 2 {
-                format!(
-                    "{} {}",
-                    event.start_at.with_timezone(&timezone()).format("%m-%d"),
-                    label(event)
-                )
+                format!("{} {}", date.format("%m-%d"), label(event, *date))
             } else {
-                label(event)
+                label(event, *date)
             };
             text(
                 &value,
@@ -1260,7 +1379,7 @@ unsafe fn paint(state: &mut App) {
             );
             state.hits.push(Hit {
                 rect,
-                action: Action::Event(event.id.clone()),
+                action: Action::Event(event.id.clone(), *date),
                 tip: format!("{}\n{}\n{}", value, event.location, event.notes),
             });
         }

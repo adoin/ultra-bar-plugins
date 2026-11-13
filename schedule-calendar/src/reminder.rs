@@ -1,5 +1,4 @@
 use crate::ui::App;
-use chrono_tz::Asia::Shanghai;
 use std::{
     mem::{size_of, zeroed},
     ptr::{null, null_mut},
@@ -20,7 +19,14 @@ pub struct Reminder {
 }
 pub unsafe fn show(app: &mut App) {
     unsafe {
-        let Some(pending) = app.repo.data.pending.first() else {
+        let Some(pending) = app
+            .repo
+            .data
+            .pending
+            .iter()
+            .find(|p| p.event.force_reminder)
+            .or_else(|| app.repo.data.pending.first())
+        else {
             return;
         };
         let key = pending.key.clone();
@@ -49,13 +55,22 @@ pub unsafe fn show(app: &mut App) {
             0,
             1,
             1,
-            app.hwnd,
+            null_mut(),
             null_mut(),
             module,
             (&mut *state as *mut Reminder).cast(),
         );
+        if hwnd.is_null() {
+            ultra_bar_native_ui::diagnostics::event(
+                "calendar",
+                "reminder.window_failed",
+                serde_json::json!({"key":state.key,"error":GetLastError()}),
+            );
+            return;
+        }
         state.hwnd = hwnd;
         state.glass = ultra_bar_native_ui::enable_glass(hwnd);
+        ultra_bar_native_ui::geometry::attach_rounded(hwnd, 20);
         let mut info: MONITORINFO = zeroed();
         info.cbSize = size_of::<MONITORINFO>() as _;
         GetMonitorInfoW(
@@ -67,8 +82,16 @@ pub unsafe fn show(app: &mut App) {
         SetWindowPos(
             hwnd,
             HWND_TOPMOST,
-            info.rcWork.right - width - 8,
-            info.rcWork.bottom - height - 8,
+            if app.smoke {
+                -32000
+            } else {
+                info.rcWork.right - width - 8
+            },
+            if app.smoke {
+                -32000
+            } else {
+                info.rcWork.bottom - height - 8
+            },
             width,
             height,
             SWP_NOACTIVATE,
@@ -76,6 +99,14 @@ pub unsafe fn show(app: &mut App) {
         app.reminder = Some(state);
         ShowWindow(hwnd, SW_SHOWNOACTIVATE);
         InvalidateRect(hwnd, null(), 0);
+        ultra_bar_native_ui::diagnostics::event(
+            "calendar",
+            "reminder.window_shown",
+            serde_json::json!({"key":app.reminder.as_ref().unwrap().key,"force":force,"visible":IsWindowVisible(hwnd)!=0,"hwnd":hwnd as usize}),
+        );
+        if !app.smoke && app.region.notification_sound_enabled {
+            crate::notifications::sound();
+        }
         if !force {
             SetTimer(hwnd, 1, 20000, None);
         }
@@ -142,7 +173,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, message: u32, w: WPARAM, l: LPARAM
                         pending.event.title,
                         pending
                             .occurrence
-                            .with_timezone(&Shanghai)
+                            .with_timezone(&crate::region::timezone())
                             .format("%m-%d %H:%M"),
                         pending.offset,
                         pending.event.location

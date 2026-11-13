@@ -20,6 +20,7 @@ pub struct Editor {
     pub pending: bool,
     session: u64,
     source: Option<CalendarEvent>,
+    date: NaiveDate,
 }
 fn schema(initial: &CalendarEvent, date: NaiveDate, session: u64, editing: bool) -> Form {
     let start = initial.start_at.with_timezone(&timezone());
@@ -171,7 +172,12 @@ fn schema(initial: &CalendarEvent, date: NaiveDate, session: u64, editing: bool)
     let mut force = Field::new("force", "强制提醒", Kind::Toggle, initial.force_reminder);
     force.span = 1;
     fields.push(force);
-    let mut done = Field::new("completed", "标记完成", Kind::Toggle, initial.completed);
+    let mut done = Field::new(
+        "completed",
+        "本次完成",
+        Kind::Toggle,
+        initial.completed_on(date),
+    );
     done.span = 1;
     fields.push(done);
     Form {
@@ -186,7 +192,11 @@ fn schema(initial: &CalendarEvent, date: NaiveDate, session: u64, editing: bool)
         can_delete: editing,
     }
 }
-fn draft(values: &Values, source: Option<&CalendarEvent>) -> Result<CalendarEvent> {
+fn draft(
+    values: &Values,
+    source: Option<&CalendarEvent>,
+    date: NaiveDate,
+) -> Result<CalendarEvent> {
     let s = |id: &str| values.get(id).map(String::as_str).unwrap_or("");
     let b = |id: &str| s(id) == "true";
     let mut reminders: Vec<i64> = serde_json::from_str::<Vec<String>>(s("reminders"))
@@ -219,7 +229,7 @@ fn draft(values: &Values, source: Option<&CalendarEvent>) -> Result<CalendarEven
         force: b("force"),
         completed: b("completed"),
     }
-    .build(source)
+    .build_on(source, date)
 }
 pub unsafe fn open(app: &mut App, id: Option<String>) {
     unsafe {
@@ -258,6 +268,7 @@ pub unsafe fn open(app: &mut App, id: Option<String>) {
                     pending: true,
                     session,
                     source,
+                    date: app.selected,
                 }))
             }
             Err(error) => ui::error(app.hwnd, Err(anyhow::anyhow!(error))),
@@ -285,8 +296,9 @@ pub unsafe fn event(app: &mut App, event: EditorEvent) {
             return;
         }
         let source = editor.source.clone();
+        let date = editor.date;
         let result = if event.action == "submit" {
-            draft(&event.values, source.as_ref()).and_then(|value| {
+            draft(&event.values, source.as_ref(), date).and_then(|value| {
                 app.selected_event = Some(value.id.clone());
                 app.repo.upsert(value)
             })
@@ -345,7 +357,7 @@ pub unsafe fn smoke(app: &mut App) -> Result<()> {
             .iter()
             .map(|f| (f.id.clone(), f.value.clone()))
             .collect();
-        draft(&values, None)?;
+        draft(&values, None, app.selected)?;
         if kind == 0
             && let Some(dir) = std::env::var_os("ULTRA_BAR_CALENDAR_SMOKE_DIR")
         {
