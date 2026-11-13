@@ -450,8 +450,8 @@ fn main() -> Result<()> {
                 }
                 Ok(Command::SettingsSaved(values)) => {
                     if values.len() == 4 {
-                        let next = std::array::from_fn(|i| values[i] == "1");
-                        let next_only_active = values[3] == "1";
+                        let next = std::array::from_fn(|i| values[i + 1] == "1");
+                        let next_only_active = values[0] == "1";
                         let saved = (|| -> anyhow::Result<()> {
                             let pending = data.join("preferences.json.new");
                             std::fs::write(
@@ -807,5 +807,6 @@ fn agent_fields(enabled: &[bool; 3], only_active: bool) -> Vec<ultra_bar_native_
         usize::from(only_active),
         &["关闭", "开启"],
     ));
+    fields.rotate_right(1);
     fields
 }

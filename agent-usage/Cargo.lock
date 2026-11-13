@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "agent-usage"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -409,7 +409,7 @@ dependencies = [
 
 [[package]]
 name = "ultra-bar-native-ui"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "quick-xml",
  "serde",
@@ -421,7 +421,7 @@ dependencies = [
 
 [[package]]
 name = "ultra-bar-plugin-sdk"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -429,7 +429,7 @@ dependencies = [
 
 [[package]]
 name = "ultra-bar-plugin-ui"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "chrono",

@@ -1,5 +1,5 @@
 {
-  "id": "com.emssion.schedule-calendar", "version": "1.0.0", "name": "Schedule Calendar", "api_version": 2,
+  "id": "com.emssion.schedule-calendar", "version": "1.1.0", "name": "Schedule Calendar", "api_version": 2,
   "entry": "main.rn", "width": 120, "slot": "clock", "icon": "\ue787", "capabilities": ["panel"],
   "panel": { "runtime": ".runtime/current.json", "binary": "schedule-calendar", "background": true }
 }

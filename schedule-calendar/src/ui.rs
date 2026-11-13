@@ -76,7 +76,7 @@ pub struct App {
 }
 fn apply_region(state: &mut App, values: &[String]) -> Result<()> {
     let config = crate::region::Config::parse(values)?;
-    crate::region::save_key(&values[7])?;
+    crate::region::save_key(&values[9])?;
     crate::region::save(&state.region_dir, &config)?;
     crate::region::set_timezone(&config.timezone)?;
     state.region = config;
@@ -84,7 +84,7 @@ fn apply_region(state: &mut App, values: &[String]) -> Result<()> {
         let _ = worker
             .send
             .try_send(crate::region::Request::Configure(state.region.clone()));
-        if !values[7].trim().is_empty() {
+        if !values[9].trim().is_empty() {
             let _ = worker.send.try_send(crate::region::Request::Refresh);
         }
     }

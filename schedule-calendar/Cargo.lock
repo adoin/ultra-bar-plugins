@@ -750,7 +750,7 @@ dependencies = [
 
 [[package]]
 name = "schedule-calendar"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -975,7 +975,7 @@ checksum = "86a801b3cea342a06d468c8710662aa29e5e05e4f5c0d62f00bbb7f2ad7941c2"
 
 [[package]]
 name = "ultra-bar-native-ui"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "quick-xml",
  "serde",
@@ -987,7 +987,7 @@ dependencies = [
 
 [[package]]
 name = "ultra-bar-plugin-sdk"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "serde",
  "serde_json",

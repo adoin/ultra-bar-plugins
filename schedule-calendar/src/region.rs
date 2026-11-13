@@ -18,6 +18,7 @@ pub struct Config {
     pub provider: usize,
     pub host: String,
     pub fahrenheit: bool,
+    pub clock_format: String,
 }
 impl Default for Config {
     fn default() -> Self {
@@ -30,6 +31,7 @@ impl Default for Config {
             provider: 0,
             host: String::new(),
             fahrenheit: false,
+            clock_format: "MM-DD HH:mm".into(),
         }
     }
 }
@@ -52,26 +54,52 @@ pub fn set_timezone(value: &str) -> Result<()> {
 }
 impl Config {
     pub fn load(dir: &std::path::Path) -> Self {
-        std::fs::read(dir.join("region.json"))
+        let stored = std::fs::read(dir.join("region.json"))
             .ok()
-            .and_then(|b| serde_json::from_slice(&b).ok())
-            .unwrap_or_default()
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok());
+        let mut config: Self = stored
+            .as_ref()
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default();
+        if stored
+            .as_ref()
+            .is_none_or(|v| v.get("clock_format").is_none())
+        {
+            // Preserve the former host preference when moving the setting here.
+            if let Some(root) = dir.parent().and_then(|p| p.parent())
+                && let Ok(bytes) = std::fs::read(root.join("settings.json"))
+                && let Ok(host) = serde_json::from_slice::<serde_json::Value>(&bytes)
+                && let Some(pattern) = host.get("clock_format").and_then(|v| v.as_str())
+                && !pattern.trim().is_empty()
+                && pattern.chars().count() <= 128
+                && !pattern.chars().any(char::is_control)
+            {
+                config.clock_format = pattern.into();
+            }
+        }
+        config
     }
     pub fn fields(&self) -> Vec<Field> {
         vec![
+            Field::text("任务栏时间格式", &self.clock_format),
+            Field::choice(
+                "任务栏时间与天气",
+                self.display,
+                &["仅时间", "并排展示", "轮播展示"],
+            ),
+            Field::choice("任务栏农历", usize::from(self.lunar), &["隐藏", "显示"]),
             Field::text("时区（IANA）", &self.timezone),
             Field::choice(
                 "每周第一天",
                 usize::from(self.sunday_first),
                 &["星期一", "星期日"],
             ),
-            Field::choice("任务栏农历", usize::from(self.lunar), &["隐藏", "显示"]),
-            Field::choice(
-                "任务栏时间与天气",
-                self.display,
-                &["仅时间", "并排展示", "轮播展示"],
-            ),
             Field::text("天气地区（城市名，或 纬度,经度）", &self.city),
+            Field::choice(
+                "温度单位",
+                usize::from(self.fahrenheit),
+                &["摄氏度 °C", "华氏度 °F"],
+            ),
             Field::choice(
                 "天气服务",
                 self.provider,
@@ -83,11 +111,6 @@ impl Config {
             ),
             Field::text("和风 API Host（专属域名）", &self.host),
             Field::secret("和风 API Key（留空保留现有密钥）"),
-            Field::choice(
-                "温度单位",
-                usize::from(self.fahrenheit),
-                &["摄氏度 °C", "华氏度 °F"],
-            ),
             Field::link(
                 "和风天气：创建项目 → 获取 API Host 与 API Key",
                 "https://dev.qweather.com/docs/configuration/project-and-key/",
@@ -95,26 +118,33 @@ impl Config {
         ]
     }
     pub fn parse(values: &[String]) -> Result<Self> {
-        ensure!(values.len() == 10, "设置不完整");
+        ensure!(values.len() == 11, "设置不完整");
         let config = Self {
-            timezone: values[0].trim().into(),
-            sunday_first: values[1] == "1",
+            timezone: values[3].trim().into(),
+            sunday_first: values[4] == "1",
             lunar: values[2] == "1",
-            display: values[3].parse::<usize>()?.min(2),
-            city: values[4].trim().into(),
-            provider: values[5].parse::<usize>()?.min(2),
-            host: values[6]
+            display: values[1].parse::<usize>()?.min(2),
+            city: values[5].trim().into(),
+            provider: values[7].parse::<usize>()?.min(2),
+            host: values[8]
                 .trim()
                 .trim_end_matches('/')
                 .trim_start_matches("https://")
                 .into(),
-            fahrenheit: values[8] == "1",
+            fahrenheit: values[6] == "1",
+            clock_format: values[0].trim().into(),
         };
         ensure!(
             config.timezone.parse::<chrono_tz::Tz>().is_ok(),
             "时区无效，请使用 IANA 时区名称"
         );
         ensure!(config.city.len() <= 160, "地区名称过长");
+        ensure!(
+            !config.clock_format.is_empty()
+                && config.clock_format.chars().count() <= 128
+                && !config.clock_format.chars().any(char::is_control),
+            "时间格式不能为空或包含控制字符，最多 128 字符"
+        );
         if !config.host.is_empty() {
             ensure!(
                 config.host.ends_with(".qweatherapi.com")
@@ -180,7 +210,7 @@ fn publish(dir: &std::path::Path, config: &Config, weather: &Weather) {
     let lunar = crate::calendar::lunar_parts(now.date_naive())
         .map(|(m, d, leap)| crate::calendar::lunar_date_label(m, d, leap))
         .unwrap_or_default();
-    let data = serde_json::json!({"version":1,"display":config.display,"lunar":if config.lunar{lunar}else{String::new()},"weather":if Utc::now().timestamp()-weather.updated<=7200{weather.summary.as_str()}else{""},"tooltip":format!("{}\n{}\n{}",weather.place,weather.detail,weather.source),"utc_offset_seconds":now.offset().fix().local_minus_utc(),"updated":Utc::now().timestamp()});
+    let data = serde_json::json!({"version":1,"clock_format":config.clock_format,"display":config.display,"lunar":if config.lunar{lunar}else{String::new()},"weather":if Utc::now().timestamp()-weather.updated<=7200{weather.summary.as_str()}else{""},"tooltip":format!("{}\n{}\n{}",weather.place,weather.detail,weather.source),"utc_offset_seconds":now.offset().fix().local_minus_utc(),"updated":Utc::now().timestamp()});
     let path = dir.join("clock.json");
     if let Ok(bytes) = serde_json::to_vec(&data) {
         let pending = dir.join("clock.json.new");
@@ -274,15 +304,36 @@ pub fn save(dir: &std::path::Path, config: &Config) -> Result<()> {
 mod tests {
     use super::*;
     #[test]
+    fn reordered_settings_preserve_values_and_keep_the_secret_separate() {
+        let config = Config {
+            clock_format: "MM-DD HH:mm ddd".into(),
+            timezone: "Asia/Tokyo".into(),
+            sunday_first: true,
+            lunar: true,
+            display: 2,
+            city: "Tokyo".into(),
+            fahrenheit: true,
+            provider: 2,
+            host: "test.qweatherapi.com".into(),
+        };
+        let fields = config.fields();
+        assert_eq!(fields[0].label, "任务栏时间格式");
+        assert!(matches!(fields[9].kind, ultra_bar_native_ui::form::Kind::Secret));
+        let mut values: Vec<_> = fields.into_iter().map(|field| field.value).collect();
+        values[9] = "test-secret-placeholder".into();
+        let parsed = Config::parse(&values).unwrap();
+        assert_eq!(serde_json::to_value(parsed).unwrap(), serde_json::to_value(config).unwrap());
+    }
+    #[test]
     fn settings_validate_timezone_and_credential_destination() {
         let fields = Config::default().fields();
         let mut v: Vec<_> = fields.into_iter().map(|f| f.value).collect();
         assert!(Config::parse(&v).is_ok());
-        v[6] = "https://evil.test".into();
+        v[8] = "https://evil.test".into();
         assert!(Config::parse(&v).is_err());
-        v[6] = "abc.qweatherapi.com".into();
+        v[8] = "abc.qweatherapi.com".into();
         assert!(Config::parse(&v).is_ok());
-        v[0] = "wrong".into();
+        v[3] = "wrong".into();
         assert!(Config::parse(&v).is_err());
     }
 }
