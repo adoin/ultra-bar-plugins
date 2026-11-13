@@ -625,7 +625,9 @@ mod tests {
     use super::*;
     #[test]
     fn subscriptions_rotate_when_idle_and_active_only_is_optional() {
-        let idle = [Some(Instant::now() - Duration::from_secs(301)); 3];
+        // A fresh Windows runner may not have 301 seconds of monotonic history.
+        // No representable old timestamp is equivalent to no recent activity.
+        let idle = [Instant::now().checked_sub(Duration::from_secs(301)); 3];
         assert_eq!(
             widget_agents([true; 3], false, None, &idle, [false, false, true]),
             [false, false, true]
