@@ -4,6 +4,15 @@ function Read-GitHubJson([string]$Endpoint) {
     if ($LASTEXITCODE) { throw "GitHub request failed: $Endpoint" }
     $raw | ConvertFrom-Json -AsHashtable
 }
+function Read-ReleaseByTag([string]$Repository, [string]$Tag) {
+    # The REST tag endpoint does not find an unpublished release whose tag has
+    # not been created yet. gh resolves drafts; use the stable database ID next.
+    $raw = & gh release view $Tag --repo $Repository --json databaseId
+    if ($LASTEXITCODE) { throw "Cannot resolve release: $Tag" }
+    $id = ($raw | ConvertFrom-Json -AsHashtable).databaseId
+    if ($id -notmatch '^\d+$') { throw 'Invalid release database ID' }
+    Read-GitHubJson "repos/$Repository/releases/$id"
+}
 function Read-ReleaseCatalog([string]$Repository, $Asset) {
     if ($Asset.size -gt 2MB) { throw 'Release catalog exceeds 2 MiB' }
     $raw = & gh api "repos/$Repository/releases/assets/$($Asset.id)" -H 'Accept: application/octet-stream'

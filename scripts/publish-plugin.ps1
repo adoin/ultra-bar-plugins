@@ -12,7 +12,7 @@ $package = Join-Path $PackageDirectory $entry.asset
 if ((Get-FileHash -LiteralPath $package -Algorithm SHA256).Hash.ToLowerInvariant() -cne $entry.sha256) { throw 'Package checksum mismatch' }
 $existing = & gh release view $tag --repo $Repository --json isDraft 2>$null
 if ($LASTEXITCODE -eq 0) {
-    $release = Read-GitHubJson "repos/$Repository/releases/tags/$([Uri]::EscapeDataString($tag))"
+    $release = Read-ReleaseByTag $Repository $tag
     if (-not $release.draft) {
         $index = $release.assets | Where-Object name -CEQ 'plugin-catalog.json' | Select-Object -First 1
         if (-not $index) { throw 'Existing publication has no catalog' }
@@ -31,7 +31,7 @@ $assets = @((Get-ChildItem -LiteralPath $PackageDirectory -File).FullName)
 Assert-TagTarget $Repository $tag $Revision
 & gh release create $tag --repo $Repository --target $Revision --draft --latest=false --title "$PluginId $($entry.version)" --notes "Plugin $PluginId $($entry.version). Source: $Revision." @assets
 if ($LASTEXITCODE) { throw 'Cannot upload plugin release' }
-$release = Read-GitHubJson "repos/$Repository/releases/tags/$([Uri]::EscapeDataString($tag))"
+$release = Read-ReleaseByTag $Repository $tag
 $null = Convert-ReleaseEntry $entry $release
 & gh release edit $tag --repo $Repository --draft=false --latest=false
 if ($LASTEXITCODE) { throw 'Cannot publish plugin release' }

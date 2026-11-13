@@ -44,3 +44,11 @@ Assert (@(Get-PluginManifests $fixture).Count -eq 1) 'Valid manifest must be acc
 (Get-Content "$fixture/example/Cargo.toml" -Raw).Replace('1.2.3','1.2.4') | Set-Content "$fixture/example/Cargo.toml"
 Assert-Fails { Get-PluginManifests $fixture }
 Write-Host 'Market tests passed: version selection, immutable reuse, failed-catalog recovery, downgrade rejection, Cargo version validation.'
+function gh { $global:LASTEXITCODE = 0; '{"databaseId":42}' }
+function Read-GitHubJson([string]$Endpoint) {
+    Assert ($Endpoint -ceq 'repos/example/plugins/releases/42') 'Drafts must resolve by release ID, not the unpublished tag endpoint'
+    @{id=42;draft=$true}
+}
+$draft = Read-ReleaseByTag 'example/plugins' 'com.example.agent/v1.0.1'
+Assert ($draft.id -eq 42 -and $draft.draft) 'Unpublished release lookup must preserve the draft'
+Write-Host 'Draft release ID lookup passed.'

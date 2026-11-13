@@ -21,7 +21,7 @@ Set-Content -LiteralPath "$output.sha256" -Value "$hash  plugin-market.json" -En
 $tag = "market/$($plan.revision)"
 $null = & gh release view $tag --repo $Repository --json isDraft 2>$null
 if ($LASTEXITCODE -eq 0) {
-    $oldRelease = Read-GitHubJson "repos/$Repository/releases/tags/$([Uri]::EscapeDataString($tag))"
+    $oldRelease = Read-ReleaseByTag $Repository $tag
     if (-not $oldRelease.draft) {
         $index = $oldRelease.assets | Where-Object name -CEQ 'plugin-market.json' | Select-Object -First 1
         if (-not $index) { throw 'Existing market snapshot is incomplete' }
