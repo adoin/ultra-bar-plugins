@@ -517,11 +517,7 @@ unsafe fn position(state: &App) {
             height,
             SWP_NOACTIVATE,
         );
-        SetWindowRgn(
-            state.hwnd,
-            CreateRoundRectRgn(0, 0, width, height, unit(20), unit(20)),
-            1,
-        );
+        ultra_bar_native_ui::geometry::attach_rounded(state.hwnd, 20);
     }
 }
 unsafe fn show_panel(state: &mut App) {
