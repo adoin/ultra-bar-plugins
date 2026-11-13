@@ -172,14 +172,16 @@ fn schema(initial: &CalendarEvent, date: NaiveDate, session: u64, editing: bool)
     let mut force = Field::new("force", "强制提醒", Kind::Toggle, initial.force_reminder);
     force.span = 1;
     fields.push(force);
-    let mut done = Field::new(
-        "completed",
-        "本次完成",
-        Kind::Toggle,
-        initial.completed_on(date),
-    );
-    done.span = 1;
-    fields.push(done);
+    if editing {
+        let mut done = Field::new(
+            "completed",
+            "本次完成",
+            Kind::Toggle,
+            initial.completed_on(date),
+        );
+        done.span = 1;
+        fields.push(done);
+    }
     Form {
         session,
         title: if editing {
@@ -339,8 +341,19 @@ pub unsafe fn smoke(app: &mut App) -> Result<()> {
         .unwrap()
         .with_timezone(&Utc);
     let event = CalendarEvent::draft(start, start + Duration::hours(1));
+    anyhow::ensure!(
+        schema(&event, app.selected, 1, true)
+            .fields
+            .iter()
+            .any(|field| field.id == "completed"),
+        "编辑日程应保留本次完成选项"
+    );
     for kind in 0..6 {
         let mut form = schema(&event, app.selected, 1, false);
+        anyhow::ensure!(
+            !form.fields.iter().any(|field| field.id == "completed"),
+            "新建日程不应包含完成选项"
+        );
         form.fields
             .iter_mut()
             .find(|f| f.id == "title")

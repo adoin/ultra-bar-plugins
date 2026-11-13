@@ -308,7 +308,14 @@ pub unsafe fn run(
             region.timezone = "Asia/Shanghai".into();
             crate::region::set_timezone(&region.timezone)?;
         }
-        let date = today();
+        let date = if smoke {
+            std::env::var("ULTRA_BAR_CALENDAR_SMOKE_DATE")
+                .ok()
+                .and_then(|value| NaiveDate::parse_from_str(&value, "%Y-%m-%d").ok())
+                .unwrap_or_else(today)
+        } else {
+            today()
+        };
         let parent_handle = if parent == 0 {
             null_mut()
         } else {
@@ -384,6 +391,7 @@ pub unsafe fn run(
                 directory.clone(),
                 public,
                 state.region.clone(),
+                state.owner as usize,
             ));
         }
         state.dpi = if owner != 0 {
@@ -462,9 +470,20 @@ pub unsafe fn run(
             let mut reminder_event =
                 CalendarEvent::draft(now - Duration::seconds(1), now + Duration::minutes(1));
             reminder_event.title = "提醒链路验证".into();
+            reminder_event.notification_url =
+                std::env::var("ULTRA_BAR_CALENDAR_FORCE_DEMO_LINK").unwrap_or_default();
+            if !reminder_event.notification_url.is_empty() {
+                reminder_event.title = "强制提醒链接测试".into();
+                reminder_event.location = "测试链接：example.com".into();
+            }
             reminder_event.force_reminder = true;
             let reminder_id = reminder_event.id.clone();
             state.repo.upsert(reminder_event)?;
+            let interactive_reminder = std::env::var_os("ULTRA_BAR_CALENDAR_FORCE_DEMO").is_some();
+            if interactive_reminder {
+                state.smoke = false; // Keep data/mutex isolation, but show the real reminder on screen.
+                state.region.notification_sound_enabled = false;
+            }
             anyhow::ensure!(
                 state.repo.scan_reminders(now - Duration::minutes(5), now)?,
                 "测试提醒未入队"
@@ -478,17 +497,25 @@ pub unsafe fn run(
             );
             ShowWindow(hwnd, SW_HIDE);
             anyhow::ensure!(IsWindowVisible(reminder) != 0, "隐藏日历时提醒也消失了");
-            SendMessageW(reminder, WM_CLOSE, 0, 0);
-            anyhow::ensure!(
-                IsWindow(reminder) != 0 && !state.repo.data.pending.is_empty(),
-                "强制提醒被关闭而没有确认"
-            );
-            SendMessageW(
-                reminder,
-                WM_LBUTTONUP,
-                0,
-                (((190 * state.dpi / 96 - 20) << 16) | (260 * state.dpi / 96)) as isize,
-            );
+            if interactive_reminder {
+                let mut message: MSG = zeroed();
+                while IsWindow(reminder) != 0 && GetMessageW(&mut message, null_mut(), 0, 0) > 0 {
+                    TranslateMessage(&message);
+                    DispatchMessageW(&message);
+                }
+            } else {
+                SendMessageW(reminder, WM_CLOSE, 0, 0);
+                anyhow::ensure!(
+                    IsWindow(reminder) != 0 && !state.repo.data.pending.is_empty(),
+                    "强制提醒被关闭而没有确认"
+                );
+                SendMessageW(
+                    reminder,
+                    WM_LBUTTONUP,
+                    0,
+                    (((190 * state.dpi / 96 - 20) << 16) | (260 * state.dpi / 96)) as isize,
+                );
+            }
             anyhow::ensure!(
                 IsWindow(reminder) == 0 && state.repo.data.pending.is_empty(),
                 "确认后没有清除提醒"
@@ -694,6 +721,44 @@ unsafe extern "system" fn wndproc(hwnd: HWND, message: u32, w: WPARAM, l: LPARAM
             }
             m if m == WM_APP + 11 => {
                 if let Some(request) = state.pending_settings.take() {
+                    if let Some(action) = &request.action {
+                        let outcome = (|| -> Result<()> {
+                            anyhow::ensure!(action == "test_qweather", "此操作不可用");
+                            anyhow::ensure!(
+                                ultra_bar_native_ui::settings_bridge::load(&state.settings_dir)?
+                                    .revision
+                                    == request.revision,
+                                "设置已更新，请重新载入后测试"
+                            );
+                            let config = crate::region::Config::parse(&request.values)?;
+                            let key = request
+                                .values
+                                .get(11)
+                                .filter(|key| !key.trim().is_empty())
+                                .cloned();
+                            state
+                                .weather_worker
+                                .as_ref()
+                                .context("天气服务尚未就绪")?
+                                .send
+                                .try_send(crate::region::Request::Test {
+                                    config,
+                                    key,
+                                    request_id: request.request_id,
+                                })?;
+                            Ok(())
+                        })();
+                        if let Err(error) = outcome {
+                            let _ = ultra_bar_native_ui::settings_bridge::publish_action_result(
+                                &state.settings_dir,
+                                state.owner as isize,
+                                request.request_id,
+                                false,
+                                error.to_string(),
+                            );
+                        }
+                        return 0;
+                    }
                     let result = (|| -> Result<()> {
                         anyhow::ensure!(
                             IsWindowEnabled(hwnd) != 0
@@ -954,12 +1019,12 @@ unsafe extern "system" fn wndproc(hwnd: HWND, message: u32, w: WPARAM, l: LPARAM
                         }
                         Action::Delete => {
                             if let Some(id) = &state.selected_event
-                                && MessageBoxW(
+                                && ultra_bar_native_ui::dialog::confirm(
                                     hwnd,
-                                    wide("删除这条日程？").as_ptr(),
-                                    wide("删除日程").as_ptr(),
-                                    MB_YESNO | MB_DEFBUTTON2,
-                                ) == IDYES
+                                    "删除日程",
+                                    "删除这条日程？",
+                                    "删除",
+                                )
                             {
                                 let result = state.repo.remove(id);
                                 error(hwnd, result);
@@ -1221,6 +1286,35 @@ unsafe fn paint(state: &mut App) {
                     );
                 }
                 let holiday = state.repo.holidays.get(&date.to_string());
+                let badge = holiday.map(|day| {
+                    let mut base = ultra_bar_native_ui::theme::Hsl::from_rgb(
+                        ultra_bar_native_ui::theme::accent_rgb(),
+                    );
+                    if !day.is_off_day {
+                        base.h = (base.h + 150.).rem_euclid(360.);
+                    }
+                    base.s = 0.68;
+                    base.l = 0.31;
+                    let color = ultra_bar_native_ui::theme::colorref(base.rgb());
+                    let badge = RECT {
+                        left: rect.right - unit(25),
+                        top: rect.top + unit(3),
+                        right: rect.right - unit(3),
+                        bottom: rect.top + unit(24),
+                    };
+                    round_fill(dc, &badge, color, unit(7));
+                    text(if day.is_off_day { "休" } else { "班" }, badge, 0x00ffffff);
+                    let stripe = RECT {
+                        left: rect.left,
+                        top: rect.top + unit(7),
+                        right: rect.left + unit(2),
+                        bottom: rect.bottom - unit(7),
+                    };
+                    let brush = CreateSolidBrush(color);
+                    FillRect(dc, &stripe, brush);
+                    ultra_bar_native_ui::fonts::delete_object(brush);
+                    badge
+                });
                 let color = if date.month() != state.month.month() {
                     ultra_bar_native_ui::theme::palette().disabled
                 } else if calendar::is_legal_rest_day(date, holiday) {
@@ -1235,12 +1329,13 @@ unsafe fn paint(state: &mut App) {
                     RECT {
                         left: rect.left + unit(6),
                         bottom: rect.top + cell_height / 2,
+                        right: badge.map_or(rect.right, |badge| badge.left - unit(3)),
                         ..rect
                     },
                     color,
                 );
                 let lunar = holiday
-                    .map(|day| format!("{} {}", if day.is_off_day { "休" } else { "班" }, day.name))
+                    .map(|day| day.name.clone())
                     .or_else(|| calendar::lunar_festival(date).map(str::to_owned))
                     .unwrap_or_else(|| calendar::lunar_label(date));
                 text(
@@ -1250,20 +1345,35 @@ unsafe fn paint(state: &mut App) {
                         top: rect.top + cell_height / 2,
                         ..rect
                     },
-                    ultra_bar_native_ui::theme::palette().muted,
+                    if holiday.is_some() {
+                        ultra_bar_native_ui::theme::palette().text
+                    } else {
+                        ultra_bar_native_ui::theme::palette().muted
+                    },
                 );
                 state.hits.push(Hit {
                     rect,
                     action: Action::Day(date),
                     tip: format!(
-                        "{} {} · {} 项日程",
+                        "{} {} · {} 项日程{}",
                         date,
                         calendar::lunar_date_label(
                             calendar::lunar_parts(date).unwrap_or((1, 1, false)).0,
                             calendar::lunar_parts(date).unwrap_or((1, 1, false)).1,
                             calendar::lunar_parts(date).unwrap_or((1, 1, false)).2
                         ),
-                        count
+                        count,
+                        holiday
+                            .map(|day| format!(
+                                "\n{} · {}",
+                                day.name,
+                                if day.is_off_day {
+                                    "放假／调休休息"
+                                } else {
+                                    "调休补班"
+                                }
+                            ))
+                            .unwrap_or_default()
                     ),
                 });
             }

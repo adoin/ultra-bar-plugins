@@ -123,7 +123,11 @@ impl Config {
                     "和风天气",
                 ],
             ),
-            Field::text("和风 API Host（专属域名）", &self.host),
+            Field::text("和风 API Host（专属域名）", &self.host).with_action(
+                "test_qweather",
+                "测试当前和风 API 配置",
+                "\u{e768}",
+            ),
             Field::secret("和风 API Key（留空保留现有密钥）"),
             Field::link(
                 "和风天气：创建项目 → 获取 API Host 与 API Key",
@@ -210,6 +214,11 @@ fn cache_key(config: &Config) -> String {
 pub enum Request {
     Configure(Config),
     Refresh,
+    Test {
+        config: Config,
+        key: Option<String>,
+        request_id: u64,
+    },
     Stop,
 }
 pub struct Worker {
@@ -235,7 +244,7 @@ fn publish(dir: &std::path::Path, config: &Config, weather: &Weather) {
         }
     }
 }
-pub fn start(dir: PathBuf, public: PathBuf, mut config: Config) -> Worker {
+pub fn start(dir: PathBuf, public: PathBuf, mut config: Config, owner: usize) -> Worker {
     let (send, commands) = mpsc::sync_channel(4);
     let (output, receive) = mpsc::sync_channel(4);
     std::thread::spawn(move || {
@@ -274,6 +283,25 @@ pub fn start(dir: PathBuf, public: PathBuf, mut config: Config) -> Worker {
                 }
                 Ok(Request::Refresh) => {
                     due = Instant::now();
+                }
+                Ok(Request::Test {
+                    config,
+                    key,
+                    request_id,
+                }) => {
+                    let outcome = crate::weather::test_qweather(&config, key.as_deref());
+                    let message = match &outcome {
+                        Ok(_) => "和风 API 连接成功".into(),
+                        Err(error) => format!("和风 API 测试失败：{error:#}"),
+                    };
+                    let _ = ultra_bar_native_ui::settings_bridge::publish_action_result(
+                        &public,
+                        owner as isize,
+                        request_id,
+                        outcome.is_ok(),
+                        message,
+                    );
+                    continue;
                 }
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
             }

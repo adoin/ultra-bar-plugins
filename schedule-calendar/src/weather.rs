@@ -100,7 +100,7 @@ fn qweather(c: &Config, key: &str) -> Result<Weather> {
             && c.host
                 .chars()
                 .all(|x| x.is_ascii_alphanumeric() || x == '.' || x == '-'),
-        "Invalid API host"
+        "请填写有效的和风 API Host"
     );
     let (lat, lon, place) = if let Some((lat, lon)) = coordinates(&c.city) {
         (lat, lon, c.city.clone())
@@ -191,9 +191,36 @@ pub fn fetch(config: &Config) -> Result<Weather> {
     }
     open_meteo(config)
 }
+pub fn test_qweather(config: &Config, entered_key: Option<&str>) -> Result<()> {
+    let saved;
+    let key = if let Some(key) = entered_key.filter(|key| !key.trim().is_empty()) {
+        key.trim()
+    } else {
+        saved = crate::region::key()?.context("请填写和风 API Key")?;
+        saved.as_str()
+    };
+    let mut test = config.clone();
+    test.provider = 2;
+    if test.city.trim().is_empty() {
+        test.city = "39.90,116.40".into();
+    }
+    qweather(&test, key).map(|_| ())
+}
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn qweather_test_never_falls_back_or_changes_provider() {
+        let config = Config {
+            host: "not-a-qweather-host.invalid".into(),
+            provider: 0,
+            ..Config::default()
+        };
+        let result = test_qweather(&config, Some("test-key-without-network"));
+        assert!(result.is_err());
+        assert_eq!(config.provider, 0);
+        assert_eq!(config.host, "not-a-qweather-host.invalid");
+    }
     #[test]
     fn validates_coordinates() {
         assert_eq!(coordinates("31.2,121.5"), Some((31.2, 121.5)));

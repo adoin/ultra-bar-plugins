@@ -23,6 +23,7 @@ $version = [string]$manifest.version
 $semver = '^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*))*))?(?:\+([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$'
 if ($version -notmatch $semver) { throw 'plugin.json version must be SemVer.' }
 if ($Tag -and $Tag -cne "$PluginId/v$version") { throw "Tag must exactly match $PluginId/v$version" }
+$hostRange = if ($manifest.host) { [string]$manifest.host } else { '>=1.0.0,<2.0.0' }
 $profile = if ($DebugBuild) { 'debug' } else { 'release' }
 $binaryName = if ($manifest.panel.binary) { [string]$manifest.panel.binary } else { $directory.Name }
 if ($binaryName -notmatch '^[a-z0-9_-]+$') { throw 'Invalid native binary name.' }
@@ -91,7 +92,7 @@ if ($manifest.panel) {
 }
 function Revision([string]$Path) { $output = & git -C $Path rev-parse HEAD 2>$null; if ($LASTEXITCODE -ne 0) { return 'working-tree' }; return [string]$output }
 $digests = @($files.Keys | Sort-Object | ForEach-Object { @{path=$_;sha256=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($files[$_])).ToLowerInvariant()} })
-$metadata = @{format='ultra-bar-plugin';schema_version=1;id=$PluginId;name=$manifest.name;version=$version;platform='windows-x86_64';host='>=1.0.0,<2.0.0';files=$digests;build=@{profile=$profile;source_revision=(Revision $libraryRoot);sdk_revision=(Revision $sdkRoot)}}
+$metadata = @{format='ultra-bar-plugin';schema_version=1;id=$PluginId;name=$manifest.name;version=$version;platform='windows-x86_64';host=$hostRange;files=$digests;build=@{profile=$profile;source_revision=(Revision $libraryRoot);sdk_revision=(Revision $sdkRoot)}}
 $name = "$PluginId--$version--windows-x86_64$(if($DebugBuild){'.debug'}).ubplugin"
 New-Item -ItemType Directory -Force $OutputDirectory | Out-Null
 $outputPath = Join-Path ([IO.Path]::GetFullPath($OutputDirectory)) $name
@@ -106,7 +107,7 @@ try {
 } finally { $zip.Dispose(); $stream.Dispose() }
 $hash = (Get-FileHash -LiteralPath $outputPath -Algorithm SHA256).Hash.ToLowerInvariant()
 [IO.File]::WriteAllText("$outputPath.sha256","$hash  $name`n")
-$catalog = @{schema_version=1;plugins=@(@{id=$PluginId;name=$manifest.name;version=$version;platform='windows-x86_64';host='>=1.0.0,<2.0.0';asset=$name;sha256=$hash;description=[string]$manifest.name})}
+$catalog = @{schema_version=1;plugins=@(@{id=$PluginId;name=$manifest.name;version=$version;platform='windows-x86_64';host=$hostRange;asset=$name;sha256=$hash;description=[string]$manifest.name})}
 [IO.File]::WriteAllText((Join-Path $OutputDirectory 'plugin-catalog.json'),($catalog|ConvertTo-Json -Depth 8))
 Write-Host "Package: $outputPath"
 Write-Host "SHA-256: $hash"

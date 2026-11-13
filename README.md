@@ -6,11 +6,11 @@
 
 | 插件 | ID | 版本 |
 | --- | --- | --- |
-| Schedule Calendar（日程、农历、地区与天气） | `com.emssion.schedule-calendar` | 1.1.1 |
+| Schedule Calendar（日程、农历、地区与天气） | `com.emssion.schedule-calendar` | 1.2.0 |
 | Everything Search（已安装软件优先搜索） | `com.emssion.everything-search` | 1.0.1 |
 | Agent Usage（订阅额度与手动重置余额） | `com.emssion.agent-usage` | 1.1.0 |
 
-在 Ultra Bar“设置 → 插件中心 → 官方插件库”按需安装，或下载 Release 中的 `.ubplugin` 单独安装。1.0.0 插件需要 Ultra Bar 1.x。官方源身份固定为 GitHub repository id `1452116417`，插件身份和更新使用各自反向域名 ID 与 SemVer。
+在 Ultra Bar“设置 → 插件中心 → 官方插件库”按需安装，或下载 Release 中的 `.ubplugin` 单独安装。Schedule Calendar 1.2.0 需要 Ultra Bar 1.2.0 或更高的 1.x 版本。官方源身份固定为 GitHub repository id `1452116417`，插件身份和更新使用各自反向域名 ID 与 SemVer。
 
 push main 自动对比各插件版本与已成功发布的包，只测试、构建版本升级的插件，其余复用原下载地址和校验值。`sdk-revision.txt` 固定 SDK 的完整提交。版本未升级的源码变更不会发布；已发布产物不可覆盖。
 
@@ -79,7 +79,7 @@ API v1 的动作白名单：`none`、`start`、`notifications`、`settings`。�
 
 当前官方插件库为本仓库 `adoin/ultra-bar-plugins`，GitHub 仓库 ID `1452116417`。新客户端读取完整市场快照 `plugin-market.json`（schema 2），按资产 ID、原 URL、SHA-256 引用各插件自己的不可变 Release 包。旧客户端继续读取单包的 `plugin-catalog.json`（schema 1）。
 
-1. 修改 `plugin.json.version`；原生插件同步修改 Cargo.toml 的版本，提交 Cargo.lock。
+1. 修改 `plugin.json.version`；原生插件同步修改 Cargo.toml 的版本，提交 Cargo.lock。可用 `plugin.json.host` 声明宿主版本范围；未声明时默认为 `>=1.0.0,<2.0.0`。
 2. 更新共享 SDK 时，先提交并推送主程序代码，再将 `sdk-revision.txt` 指向那个完整提交；需要采用新 SDK 的插件各自升版本。
 3. 提交并 push main。`Publish plugin market` 自动生成构建清单，只有新插件或版本升级者进入 Windows 构建任务。无版本变化时整个构建任务跳过。
 4. 包通过测试后，自动创建 `<ID>/v<版本>` Release/tag；最后发布 `market/<commit>` 完整目录快照。没有升级的插件继续引用历史包，无需重传。

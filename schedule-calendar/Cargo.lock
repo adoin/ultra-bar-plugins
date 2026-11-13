@@ -895,7 +895,7 @@ dependencies = [
 
 [[package]]
 name = "schedule-calendar"
-version = "1.1.1"
+version = "1.2.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1149,7 +1149,7 @@ checksum = "86a801b3cea342a06d468c8710662aa29e5e05e4f5c0d62f00bbb7f2ad7941c2"
 
 [[package]]
 name = "ultra-bar-native-ui"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "quick-xml",
  "serde",

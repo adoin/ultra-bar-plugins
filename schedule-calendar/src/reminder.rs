@@ -17,6 +17,24 @@ pub struct Reminder {
     key: String,
     glass: bool,
 }
+#[derive(Debug, PartialEq)]
+enum FooterAction {
+    Link,
+    Acknowledge,
+}
+fn footer_action(x: i32, y: i32, height: i32, dpi: i32, has_link: bool) -> Option<FooterAction> {
+    let u = |n| n * dpi / 96;
+    if y < height - u(42) || y >= height - u(10) {
+        return None;
+    }
+    if (u(240)..u(364)).contains(&x) {
+        Some(FooterAction::Acknowledge)
+    } else if has_link && (u(16)..u(140)).contains(&x) {
+        Some(FooterAction::Link)
+    } else {
+        None
+    }
+}
 pub unsafe fn show(app: &mut App) {
     unsafe {
         let Some(pending) = app
@@ -224,33 +242,55 @@ unsafe extern "system" fn wndproc(hwnd: HWND, message: u32, w: WPARAM, l: LPARAM
                 let y = (l >> 16) as u16 as i16 as i32;
                 let mut rect: RECT = zeroed();
                 GetClientRect(hwnd, &mut rect);
-                if y >= rect.bottom - 42 * app.dpi / 96 {
-                    if x >= 240 * app.dpi / 96 {
-                        acknowledge(state);
-                    } else if let Some(pending) = app
+                let url = app
+                    .repo
+                    .data
+                    .pending
+                    .iter()
+                    .find(|pending| pending.key == state.key)
+                    .map(|pending| pending.event.notification_url.clone())
+                    .unwrap_or_default();
+                match footer_action(x, y, rect.bottom, app.dpi, !url.is_empty()) {
+                    Some(FooterAction::Acknowledge) => acknowledge(state),
+                    Some(FooterAction::Link)
+                        if url::Url::parse(&url).is_ok_and(|url| {
+                            matches!(url.scheme(), "https" | "http") && url.host_str().is_some()
+                        }) =>
+                    {
+                        let result = ShellExecuteW(
+                            hwnd,
+                            wide("open").as_ptr(),
+                            wide(&url).as_ptr(),
+                            null(),
+                            null(),
+                            SW_SHOWNORMAL,
+                        );
+                        let opened = result as usize > 32;
+                        ultra_bar_native_ui::diagnostics::event(
+                            "calendar",
+                            "reminder.link_opened",
+                            serde_json::json!({"key":state.key,"ok":opened,"shell_result":result as usize}),
+                        );
+                        if opened {
+                            acknowledge(state);
+                        }
+                    }
+                    _ => {}
+                }
+                0
+            }
+            WM_TIMER => {
+                if w == 1
+                    && app
                         .repo
                         .data
                         .pending
                         .iter()
                         .find(|pending| pending.key == state.key)
-                    {
-                        let url = &pending.event.notification_url;
-                        if url.starts_with("https://") || url.starts_with("http://") {
-                            ShellExecuteW(
-                                hwnd,
-                                wide("open").as_ptr(),
-                                wide(url).as_ptr(),
-                                null(),
-                                null(),
-                                SW_SHOWNORMAL,
-                            );
-                        }
-                    }
+                        .is_some_and(|pending| !pending.event.force_reminder)
+                {
+                    acknowledge(state);
                 }
-                0
-            }
-            WM_TIMER => {
-                acknowledge(state);
                 0
             }
             WM_CLOSE => {
@@ -272,6 +312,29 @@ unsafe extern "system" fn wndproc(hwnd: HWND, message: u32, w: WPARAM, l: LPARAM
             }
             WM_ERASEBKGND => 1,
             _ => DefWindowProcW(hwnd, message, w, l),
+        }
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn only_real_footer_buttons_acknowledge_or_launch() {
+        for dpi in [96, 144, 192] {
+            let u = |n| n * dpi / 96;
+            let h = u(190);
+            assert_eq!(
+                footer_action(u(20), h - u(20), h, dpi, true),
+                Some(FooterAction::Link)
+            );
+            assert_eq!(
+                footer_action(u(260), h - u(20), h, dpi, true),
+                Some(FooterAction::Acknowledge)
+            );
+            for (x, y) in [(200, 170), (20, 100), (375, 170), (260, 185)] {
+                assert_eq!(footer_action(u(x), u(y), h, dpi, true), None);
+            }
+            assert_eq!(footer_action(u(20), h - u(20), h, dpi, false), None);
         }
     }
 }
