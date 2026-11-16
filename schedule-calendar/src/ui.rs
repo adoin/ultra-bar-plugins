@@ -77,7 +77,7 @@ pub struct App {
 }
 fn apply_region(state: &mut App, values: &[String]) -> Result<()> {
     let config = crate::region::Config::parse(values)?;
-    crate::region::save_key(&values[11])?;
+    crate::region::save_key(&values[crate::region::API_KEY_FIELD])?;
     crate::region::save(&state.region_dir, &config)?;
     crate::region::set_timezone(&config.timezone)?;
     state.region = config;
@@ -85,7 +85,7 @@ fn apply_region(state: &mut App, values: &[String]) -> Result<()> {
         let _ = worker
             .send
             .try_send(crate::region::Request::Configure(state.region.clone()));
-        if !values[11].trim().is_empty() {
+        if !values[crate::region::API_KEY_FIELD].trim().is_empty() {
             let _ = worker.send.try_send(crate::region::Request::Refresh);
         }
     }
@@ -733,7 +733,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, message: u32, w: WPARAM, l: LPARAM
                             let config = crate::region::Config::parse(&request.values)?;
                             let key = request
                                 .values
-                                .get(11)
+                                .get(crate::region::API_KEY_FIELD)
                                 .filter(|key| !key.trim().is_empty())
                                 .cloned();
                             state

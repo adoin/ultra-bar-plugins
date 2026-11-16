@@ -1,5 +1,5 @@
 use anyhow::{Context, Result, ensure};
-use chrono::{Offset, Utc};
+use chrono::{Datelike, Offset, Utc};
 use serde::{Deserialize, Serialize};
 use std::{
     path::PathBuf,
@@ -14,6 +14,7 @@ pub struct Config {
     pub sunday_first: bool,
     pub lunar: bool,
     pub display: usize,
+    pub rotation_seconds: u32,
     pub city: String,
     pub provider: usize,
     pub host: String,
@@ -22,6 +23,7 @@ pub struct Config {
     pub notifications_enabled: bool,
     pub notification_sound_enabled: bool,
 }
+pub const API_KEY_FIELD: usize = 12;
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -29,6 +31,7 @@ impl Default for Config {
             sunday_first: false,
             lunar: false,
             display: 0,
+            rotation_seconds: 6,
             city: String::new(),
             provider: 0,
             host: String::new(),
@@ -81,6 +84,9 @@ impl Config {
                 config.clock_format = pattern.into();
             }
         }
+        if !(2..=3600).contains(&config.rotation_seconds) {
+            config.rotation_seconds = 6;
+        }
         config
     }
     pub fn fields(&self) -> Vec<Field> {
@@ -91,6 +97,7 @@ impl Config {
                 self.display,
                 &["仅时间", "并排展示", "轮播展示"],
             ),
+            Field::text("轮播间隔（秒，2–3600）", self.rotation_seconds.to_string()),
             Field::choice("任务栏农历", usize::from(self.lunar), &["隐藏", "显示"]),
             Field::choice(
                 "日程提醒",
@@ -136,27 +143,35 @@ impl Config {
         ]
     }
     pub fn parse(values: &[String]) -> Result<Self> {
-        ensure!(values.len() == 13, "设置不完整");
+        ensure!(values.len() == 14, "设置不完整");
         let config = Self {
-            timezone: values[5].trim().into(),
-            sunday_first: values[6] == "1",
-            lunar: values[2] == "1",
+            timezone: values[6].trim().into(),
+            sunday_first: values[7] == "1",
+            lunar: values[3] == "1",
             display: values[1].parse::<usize>()?.min(2),
-            city: values[7].trim().into(),
-            provider: values[9].parse::<usize>()?.min(2),
-            host: values[10]
+            rotation_seconds: values[2]
+                .trim()
+                .parse::<u32>()
+                .context("轮播间隔须为 2–3600 秒的整数")?,
+            city: values[8].trim().into(),
+            provider: values[10].parse::<usize>()?.min(2),
+            host: values[11]
                 .trim()
                 .trim_end_matches('/')
                 .trim_start_matches("https://")
                 .into(),
-            fahrenheit: values[8] == "1",
+            fahrenheit: values[9] == "1",
             clock_format: values[0].trim().into(),
-            notifications_enabled: values[3] == "1",
-            notification_sound_enabled: values[4] == "1",
+            notifications_enabled: values[4] == "1",
+            notification_sound_enabled: values[5] == "1",
         };
         ensure!(
             config.timezone.parse::<chrono_tz::Tz>().is_ok(),
             "时区无效，请使用 IANA 时区名称"
+        );
+        ensure!(
+            (2..=3600).contains(&config.rotation_seconds),
+            "轮播间隔须为 2–3600 秒的整数"
         );
         ensure!(config.city.len() <= 160, "地区名称过长");
         ensure!(
@@ -230,12 +245,29 @@ impl Drop for Worker {
         let _ = self.send.try_send(Request::Stop);
     }
 }
+fn clock_tooltip(date: chrono::NaiveDate, lunar: &str, weather: &Weather) -> String {
+    let weekday =
+        ["一", "二", "三", "四", "五", "六", "日"][date.weekday().num_days_from_monday() as usize];
+    let mut lines = vec![
+        format!("{} 星期{} {}", date.format("%Y-%m-%d"), weekday, lunar)
+            .trim_end()
+            .to_owned(),
+    ];
+    lines.extend(
+        [weather.place.trim(), weather.detail.trim()]
+            .into_iter()
+            .filter(|line| !line.is_empty())
+            .map(str::to_owned),
+    );
+    lines.join("\n")
+}
 fn publish(dir: &std::path::Path, config: &Config, weather: &Weather) {
     let now = Utc::now().with_timezone(&timezone());
     let lunar = crate::calendar::lunar_parts(now.date_naive())
         .map(|(m, d, leap)| crate::calendar::lunar_date_label(m, d, leap))
         .unwrap_or_default();
-    let data = serde_json::json!({"version":1,"clock_format":config.clock_format,"display":config.display,"lunar":if config.lunar{lunar}else{String::new()},"weather":if Utc::now().timestamp()-weather.updated<=7200{weather.summary.as_str()}else{""},"tooltip":format!("{}\n{}\n{}",weather.place,weather.detail,weather.source),"utc_offset_seconds":now.offset().fix().local_minus_utc(),"updated":Utc::now().timestamp()});
+    let tooltip = clock_tooltip(now.date_naive(), &lunar, weather);
+    let data = serde_json::json!({"version":1,"clock_format":config.clock_format,"display":config.display,"rotation_seconds":config.rotation_seconds,"lunar":if config.lunar{lunar}else{String::new()},"weather":if Utc::now().timestamp()-weather.updated<=7200{weather.summary.as_str()}else{""},"tooltip":tooltip,"utc_offset_seconds":now.offset().fix().local_minus_utc(),"updated":Utc::now().timestamp()});
     let path = dir.join("clock.json");
     if let Ok(bytes) = serde_json::to_vec(&data) {
         let pending = dir.join("clock.json.new");
@@ -348,6 +380,24 @@ pub fn save(dir: &std::path::Path, config: &Config) -> Result<()> {
 mod tests {
     use super::*;
     #[test]
+    fn rotation_setting_defaults_for_existing_profiles_and_checks_bounds() {
+        let config: Config = serde_json::from_str(r#"{"display":2}"#).unwrap();
+        assert_eq!(config.rotation_seconds, 6);
+        let mut values: Vec<_> = config.fields().into_iter().map(|f| f.value).collect();
+        for bad in ["", "0", "1", "3601", "6.5", "no"] {
+            values[2] = bad.into();
+            assert!(Config::parse(&values).is_err());
+        }
+        for good in [2, 15, 3600] {
+            values[2] = good.to_string();
+            assert_eq!(Config::parse(&values).unwrap().rotation_seconds, good);
+        }
+        assert!(matches!(
+            config.fields()[API_KEY_FIELD].kind,
+            ultra_bar_native_ui::form::Kind::Secret
+        ));
+    }
+    #[test]
     fn reordered_settings_preserve_values_and_keep_the_secret_separate() {
         let config = Config {
             clock_format: "MM-DD HH:mm ddd".into(),
@@ -355,6 +405,7 @@ mod tests {
             sunday_first: true,
             lunar: true,
             display: 2,
+            rotation_seconds: 12,
             city: "Tokyo".into(),
             fahrenheit: true,
             provider: 2,
@@ -365,11 +416,11 @@ mod tests {
         let fields = config.fields();
         assert_eq!(fields[0].label, "任务栏时间格式");
         assert!(matches!(
-            fields[11].kind,
+            fields[12].kind,
             ultra_bar_native_ui::form::Kind::Secret
         ));
         let mut values: Vec<_> = fields.into_iter().map(|field| field.value).collect();
-        values[11] = "test-secret-placeholder".into();
+        values[12] = "test-secret-placeholder".into();
         let parsed = Config::parse(&values).unwrap();
         assert_eq!(
             serde_json::to_value(parsed).unwrap(),
@@ -381,11 +432,11 @@ mod tests {
         let fields = Config::default().fields();
         let mut v: Vec<_> = fields.into_iter().map(|f| f.value).collect();
         assert!(Config::parse(&v).is_ok());
-        v[10] = "https://evil.test".into();
+        v[11] = "https://evil.test".into();
         assert!(Config::parse(&v).is_err());
-        v[10] = "abc.qweatherapi.com".into();
+        v[11] = "abc.qweatherapi.com".into();
         assert!(Config::parse(&v).is_ok());
-        v[5] = "wrong".into();
+        v[6] = "wrong".into();
         assert!(Config::parse(&v).is_err());
     }
 }
