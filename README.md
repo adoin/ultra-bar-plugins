@@ -7,10 +7,10 @@
 | 插件 | ID | 版本 |
 | --- | --- | --- |
 | Schedule Calendar（日程、农历、地区与天气） | `com.emssion.schedule-calendar` | 1.3.1 |
-| Everything Search（已安装软件优先搜索） | `com.emssion.everything-search` | 1.0.3 |
+| Everything Search（已安装软件优先搜索） | `com.emssion.everything-search` | 1.0.4 |
 | Agent Usage（订阅额度与手动重置余额） | `com.emssion.agent-usage` | 1.1.2 |
 
-在 Ultra Bar“设置 → 插件中心 → 官方插件库”按需安装，或下载 Release 中的 `.ubplugin` 单独安装。Schedule Calendar 1.3.1 需要 Ultra Bar 1.3.1 或更高的 1.x 版本。官方源身份固定为 GitHub repository id `1452116417`，插件身份和更新使用各自反向域名 ID 与 SemVer。
+在 Ultra Bar“设置 → 插件中心 → 官方插件库”按需安装，或下载 Release 中的 `.ubplugin` 单独安装。Schedule Calendar 1.3.1 需要 Ultra Bar 1.3.1 或更高的 1.x 版本；Everything Search 1.0.4 需要 Ultra Bar 1.2.0 或更高的 1.x 版本。官方源身份固定为 GitHub repository id `1452116417`，插件身份和更新使用各自反向域名 ID 与 SemVer。
 
 push main 自动对比各插件版本与已成功发布的包，只测试、构建版本升级的插件，其余复用原下载地址和校验值。`sdk-revision.txt` 固定 SDK 的完整提交。版本未升级的源码变更不会发布；已发布产物不可覆盖。
 

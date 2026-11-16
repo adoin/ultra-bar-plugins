@@ -73,7 +73,7 @@ checksum = "773648b94d0e5d620f64f280777445740e61fe701025087ec8b57f45c791888b"
 
 [[package]]
 name = "everything-search"
-version = "1.0.3"
+version = "1.0.4"
 dependencies = [
  "anyhow",
  "regex",
@@ -349,7 +349,7 @@ dependencies = [
 
 [[package]]
 name = "ultra-bar-plugin-ui"
-version = "1.1.0"
+version = "1.1.1"
 dependencies = [
  "anyhow",
  "chrono",
