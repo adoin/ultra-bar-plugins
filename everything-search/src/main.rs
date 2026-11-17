@@ -100,6 +100,17 @@ fn run_main() -> anyhow::Result<()> {
                         apps = apps::load();
                         true
                     }
+                    Command::Uninstall(id) => {
+                        if let Err(error) = apps::uninstall(&apps, &id) {
+                            panel.update_query(
+                                &query,
+                                panel.query_revision(),
+                                apps::search(&apps, &query),
+                                format!("{error:#}"),
+                            );
+                        }
+                        false
+                    }
                     Command::SettingsSaved(values) => {
                         match settings::Settings::from_values(&values).and_then(|next| {
                             next.save(&data)?;
@@ -228,6 +239,7 @@ fn finish(
                             .to_string_lossy()
                             .into_owned(),
                         path: Some(path.to_string_lossy().into_owned()),
+                        uninstall: None,
                     }
                 }))
                 .collect(),

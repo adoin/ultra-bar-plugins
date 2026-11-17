@@ -1,4 +1,4 @@
-//! Installed desktop programs and packaged AppsFolder applications. Never run uninstall commands.
+//! Installed programs with separate launch and explicit uninstall actions.
 use std::ffi::c_void;
 use std::{
     collections::HashSet,
@@ -15,9 +15,65 @@ use windows_sys::{
 };
 #[derive(Clone, serde::Serialize)]
 pub struct App {
+    pub id: String,
     pub name: String,
     pub publisher: String,
     pub launch: Option<String>,
+    pub uninstall: Option<Uninstall>,
+}
+pub use ultra_bar_plugin_sdk::UninstallTarget as Uninstall;
+fn desktop_uninstall(command: &str) -> Option<Uninstall> {
+    let command = command.trim();
+    if command.is_empty() || command.contains(['\0', '\r', '\n']) {
+        return None;
+    }
+    let (program, arguments) = if let Some(quoted) = command.strip_prefix('"') {
+        let end = quoted.find('"')?;
+        (&quoted[..end], quoted[end + 1..].trim())
+    } else {
+        let lower = command.to_ascii_lowercase();
+        let end = lower.match_indices(".exe").find_map(|(i, _)| {
+            let end = i + 4;
+            (command[end..].is_empty() || command[end..].starts_with(char::is_whitespace))
+                .then_some(end)
+        })?;
+        (&command[..end], command[end..].trim())
+    };
+    if !program.to_ascii_lowercase().ends_with(".exe") {
+        return None;
+    }
+    let program = if program.eq_ignore_ascii_case("msiexec.exe") {
+        std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".into())
+            + "\\System32\\msiexec.exe"
+    } else {
+        program.to_string()
+    };
+    if !std::path::Path::new(&program).is_absolute() {
+        return None;
+    }
+    Some(Uninstall::Desktop {
+        program,
+        arguments: arguments.into(),
+    })
+}
+pub fn uninstall(apps: &[App], id: &str) -> anyhow::Result<()> {
+    let app = apps
+        .iter()
+        .find(|app| app.id == id)
+        .ok_or_else(|| anyhow::anyhow!("软件列表已变化，请刷新后重试"))?;
+    let target = app
+        .uninstall
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("该软件没有可用的卸载入口"))?;
+    ultra_bar_plugin_ui::send(&ultra_bar_plugin_ui::PluginEvent::Uninstall {
+        target: target.clone(),
+    })?;
+    ultra_bar_native_ui::diagnostics::event(
+        "search",
+        "app.uninstall_requested",
+        serde_json::json!({"id":id,"name":app.name}),
+    );
+    Ok(())
 }
 struct Key(HKEY);
 impl Drop for Key {
@@ -48,7 +104,19 @@ unsafe fn string(key: HKEY, name: &str) -> String {
             return String::new();
         }
         let end = buffer.iter().position(|&x| x == 0).unwrap_or(buffer.len());
-        String::from_utf16_lossy(&buffer[..end])
+        let text = String::from_utf16_lossy(&buffer[..end]);
+        if kind == REG_EXPAND_SZ {
+            let mut expanded = vec![0u16; 32768];
+            let length = windows_sys::Win32::System::Environment::ExpandEnvironmentStringsW(
+                wide(&text).as_ptr(),
+                expanded.as_mut_ptr(),
+                expanded.len() as u32,
+            ) as usize;
+            if length > 0 && length <= expanded.len() {
+                return String::from_utf16_lossy(&expanded[..length - 1]);
+            }
+        }
+        text
     }
 }
 unsafe fn number(key: HKEY, name: &str) -> u32 {
@@ -319,9 +387,13 @@ fn packaged_apps() -> anyhow::Result<Vec<App>> {
                 continue;
             }
             result.push(App {
+                id: format!("app:{id}"),
                 name,
                 publisher: "商店应用".into(),
                 launch: Some(format!("shell:AppsFolder\\{id}")),
+                uninstall: Some(Uninstall::Packaged {
+                    target: format!("shell:AppsFolder\\{id}"),
+                }),
             });
         }
         Ok(result)
@@ -390,6 +462,7 @@ pub fn load() -> Vec<App> {
                         continue;
                     }
                     let sub = Key(sub);
+                    let registry_name = String::from_utf16_lossy(&name[..len as usize]);
                     let name = string(sub.0, "DisplayName");
                     if name.is_empty()
                         || number(sub.0, "SystemComponent") == 1
@@ -406,6 +479,30 @@ pub fn load() -> Vec<App> {
                         &links,
                     );
                     apps.push(App {
+                        id: format!(
+                            "registry:{}:{view}:{registry_name}",
+                            if hive == HKEY_CURRENT_USER {
+                                "user"
+                            } else {
+                                "machine"
+                            }
+                        ),
+                        uninstall: if number(sub.0, "NoRemove") != 0 {
+                            None
+                        } else if number(sub.0, "WindowsInstaller") == 1
+                            && registry_name.starts_with('{')
+                            && registry_name.ends_with('}')
+                            && registry_name.len() == 38
+                        {
+                            Some(Uninstall::Desktop {
+                                program: std::env::var("SystemRoot")
+                                    .unwrap_or_else(|_| "C:\\Windows".into())
+                                    + "\\System32\\msiexec.exe",
+                                arguments: format!("/x {registry_name}"),
+                            })
+                        } else {
+                            desktop_uninstall(&string(sub.0, "UninstallString"))
+                        },
                         name,
                         publisher,
                         launch,
@@ -465,6 +562,7 @@ pub fn search(apps: &[App], query: &str) -> Vec<ultra_bar_plugin_ui::Row> {
                 }
             ),
             path: a.launch.clone(),
+            uninstall: a.uninstall.as_ref().map(|_| a.id.clone()),
         })
         .collect()
 }
@@ -472,13 +570,49 @@ pub fn search(apps: &[App], query: &str) -> Vec<ultra_bar_plugin_ui::Row> {
 mod tests {
     use super::*;
     #[test]
+    fn uninstall_targets_preserve_arguments_and_never_become_launch_targets() {
+        for command in [
+            r#""C:\Program Files\Example\uninstall.exe" /normal "with spaces""#,
+            r#"C:\Program Files\Example\uninstall.exe /normal "with spaces""#,
+        ] {
+            let Some(Uninstall::Desktop { program, arguments }) = desktop_uninstall(command) else {
+                panic!("missing uninstall target")
+            };
+            assert_eq!(program, r"C:\Program Files\Example\uninstall.exe");
+            assert_eq!(arguments, r#"/normal "with spaces""#);
+        }
+        for invalid in [
+            "",
+            "uninstall.exe /s",
+            "https://example.com/remove",
+            "\"C:\\bad.exe",
+            "C:\\bad.exe\n/delete",
+        ] {
+            assert!(desktop_uninstall(invalid).is_none(), "{invalid:?}");
+        }
+        let app = App {
+            id: "registered-app".into(),
+            name: "Example".into(),
+            publisher: String::new(),
+            launch: None,
+            uninstall: desktop_uninstall(r"C:\Example\uninstall.exe"),
+        };
+        let rows = search(&[app], "Example");
+        assert!(rows[0].path.is_none());
+        assert_eq!(rows[0].uninstall.as_deref(), Some("registered-app"));
+    }
+    #[test]
     fn packaged_apps_keep_distinct_identities_and_replace_unlaunchable_entries() {
         let packaged = |id: &str| App {
+            id: id.into(),
+            uninstall: None,
             name: "ChatGPT".into(),
             publisher: "商店应用".into(),
             launch: Some(format!("shell:AppsFolder\\{id}!App")),
         };
         let mut apps = vec![App {
+            id: "old".into(),
+            uninstall: None,
             name: "ChatGPT".into(),
             publisher: String::new(),
             launch: None,
@@ -502,11 +636,15 @@ mod tests {
     fn prefix_apps_rank_first_and_uninstall_is_never_launched() {
         let apps = vec![
             App {
+                id: "1".into(),
+                uninstall: None,
                 name: "My Editor".into(),
                 publisher: String::new(),
                 launch: None,
             },
             App {
+                id: "2".into(),
+                uninstall: None,
                 name: "Editor".into(),
                 publisher: String::new(),
                 launch: None,

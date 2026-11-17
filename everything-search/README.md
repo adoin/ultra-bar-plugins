@@ -1,12 +1,14 @@
 # Everything Search
 
+需要 Ultra Bar 1.3.5 或更高的 1.x 版本，卸载操作由宿主执行。
+
 “忽略依赖目录”默认开启，规则独立于“额外路径正则”，无需手动填写 `node_modules`。匹配任意盘符与任意层级的完整目录段，排除目录本身和全部后代；也覆盖 Electron 常见的 `__node_modules`、`node_modules.asar.unpacked`。不会仅因 `node_modules_backup` 或日志文件名含有 `node_modules` 而把它们排除。设置中的正则填写表达式主体，不使用 JavaScript 的 `/…/g` 包装；忽略大小写使用 `(?i)`。
 
 可从主设置窗口的插件分区或搜索面板齿轮打开独立设置。路径正则排除在搜索引擎端执行，使用 `!path:regex:"…"`，同时过滤已安装软件的启动路径；无效正则不会覆盖已有配置。规则默认关闭，可填写如 `(?i)\\cache\\|\.tmp$`。
 
-每条结果右侧依次为打开、打开所在位置、复制完整路径。右键也可选择操作；快捷键为 Enter、Ctrl+Enter、Ctrl+Shift+C。复制在插件进程内完成；打开与定位仍由宿主执行，避免用户启动的程序落入插件任务组。
+每条结果右侧依次为打开（三角形）、打开所在位置（文件夹）、复制完整路径（双页）。已安装软件另有卸载（垃圾桶）入口，右键菜单也可卸载，确认后由主程序在独立进程中调用登记的卸载程序；商店应用优先调用系统卸载操作，无法调用时进入系统应用设置。普通文件没有卸载入口。右键也可选择操作；快捷键为 Enter、Ctrl+Enter、Ctrl+Shift+C。复制在插件进程内完成；打开与定位仍由宿主执行，避免用户启动的程序落入插件任务组。
 
-优先搜索“程序和功能”对应的 HKCU/HKLM 卸载注册表（32/64 位视图），排除系统组件和子更新项；开始菜单快捷方式、应用图标或安装目录用于定位启动入口。软件匹配排在文件前，未找到启动入口仍可查看登记信息。不会执行卸载命令。启动时缓存软件列表，手动刷新时更新，后台不扫描安装目录。
+优先搜索“程序和功能”对应的 HKCU/HKLM 卸载注册表（32/64 位视图），排除系统组件和子更新项；开始菜单快捷方式、应用图标或安装目录用于定位启动入口。软件匹配排在文件前，未找到启动入口仍可查看登记信息。搜索或打开结果不会执行卸载命令；卸载需要单独选择并确认，尊重系统的不可卸载标记，不使用静默卸载字段。启动时缓存软件列表，手动刷新时更新，后台不扫描安装目录。
 
 齿轮中可关闭默认依赖忽略，或添加用分号分隔的目录名／完整路径。默认忽略 node_modules、.pnpm-store、.venv、site-packages、.git/objects、.cargo/registry、.gradle/caches、.nuget/packages、.yarn/cache；不排除普通 src、build、dist、packages 等目录。规则保存在插件自己的 settings.json，并直接组成 Everything 查询，不修改其全局索引与排除设置。
 
@@ -18,4 +20,4 @@ ID：`com.emssion.everything-search`。搜索入口位于开始按钮旁；点�
 
 官方协议：[SDK](https://www.voidtools.com/support/everything/sdk/)、[IPC](https://www.voidtools.com/support/everything/sdk/ipc/)、[服务说明](https://www.voidtools.com/support/everything/everything_service/)。
 
-从主项目执行 `pwsh.exe -NoLogo -NoProfile -File ./dev.ps1 -Task PluginBuild`，在插件仓库使用 `scripts/package-plugin.ps1 -PluginId com.emssion.everything-search` 打包。发布 tag：`com.emssion.everything-search/v0.2.0`。
+从主项目执行 `pwsh.exe -NoLogo -NoProfile -File ./dev.ps1 -Task PluginBuild`，在插件仓库使用 `scripts/package-plugin.ps1 -PluginId com.emssion.everything-search` 打包。每个插件在 `plugin.json` 维护版本，提交到 main 后由市场工作流发布对应版本包与完整目录快照。

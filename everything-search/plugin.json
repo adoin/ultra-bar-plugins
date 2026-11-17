@@ -1,8 +1,8 @@
 {
   "id": "com.emssion.everything-search",
   "name": "Everything Search",
-  "version": "1.0.4",
-  "host": ">=1.2.0,<2.0.0",
+  "version": "1.0.5",
+  "host": ">=1.3.5,<2.0.0",
   "api_version": 3,
   "entry": "main.rn",
   "slot": "leading",
