@@ -42,6 +42,12 @@ pub fn has_subscription() -> bool {
         .ok()
         .is_some_and(|value| value["value"]["reading"]["usage"]["hasNonZeroIncludedLimit"] == true)
 }
+fn decode_snapshot(bytes: &[u8]) -> Result<Option<Value>> {
+    let value: Value = serde_json::from_slice(bytes)?;
+    // Grok Bot v3 adds usage metadata but still stores the weekly quota in the
+    // same fields as v2. Do not interpret unknown schemas as a valid quota.
+    Ok(matches!(value["schemaVersion"].as_u64(), Some(2 | 3)).then_some(value))
+}
 fn snapshot() -> Result<Value> {
     let mut entries = vec![];
     for entry in std::fs::read_dir(snapshot_dir())?
@@ -55,11 +61,9 @@ fn snapshot() -> Result<Value> {
         if entry.metadata()?.len() > 16384 {
             continue;
         }
-        let value: Value = serde_json::from_slice(&std::fs::read(path)?)?;
-        if value["schemaVersion"] != 2 {
-            continue;
+        if let Some(value) = decode_snapshot(&std::fs::read(path)?)? {
+            entries.push(value);
         }
-        entries.push(value);
     }
     ensure!(entries.len() == 1, "Grok Bot 没有唯一可用的额度快照");
     Ok(entries.remove(0))
@@ -117,6 +121,29 @@ fn parse(value: &Value) -> Result<super::Quota> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn v3_snapshot_loads_the_weekly_quota_and_reset_even_when_exhausted() {
+        let now = super::super::cache::now();
+        let mut value = serde_json::json!({"schemaVersion":3,"value":{"reading":{
+            "readAtMs":now*1000,"usage":{"percentUsed":100,"hasNonZeroIncludedLimit":true,
+            "nextResetMs":(now+3600)*1000,"wouldRefuseSend":true}
+        }}});
+        for schema in [2, 3] {
+            value["schemaVersion"] = schema.into();
+            let snapshot = decode_snapshot(&serde_json::to_vec(&value).unwrap())
+                .unwrap()
+                .unwrap();
+            let quota = parse(&snapshot).unwrap();
+            assert_eq!(quota.remaining, Some(0.));
+            assert_eq!(quota.next_reset, Some(now + 3600));
+        }
+        value["schemaVersion"] = 4.into();
+        assert!(
+            decode_snapshot(&serde_json::to_vec(&value).unwrap())
+                .unwrap()
+                .is_none()
+        );
+    }
     #[test]
     fn grok_snapshot_is_remaining_percent_not_api_credit_balance() {
         let value = serde_json::json!({"value":{"reading":{"readAtMs":super::super::cache::now()*1000,"usage":{"percentUsed":6.7,"hasNonZeroIncludedLimit":true,"unifiedPlanName":"Premium"}}}});
