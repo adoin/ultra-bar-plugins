@@ -14,7 +14,9 @@ pub struct Config {
     pub sunday_first: bool,
     pub lunar: bool,
     pub display: usize,
-    pub rotation_seconds: u32,
+    #[serde(alias = "rotation_seconds")]
+    pub clock_seconds: u32,
+    pub weather_seconds: u32,
     pub city: String,
     pub provider: usize,
     pub host: String,
@@ -23,7 +25,9 @@ pub struct Config {
     pub notifications_enabled: bool,
     pub notification_sound_enabled: bool,
 }
-pub const API_KEY_FIELD: usize = 12;
+pub const API_KEY_FIELD: usize = 13;
+const DEFAULT_CLOCK_SECONDS: u32 = 12;
+const DEFAULT_WEATHER_SECONDS: u32 = 4;
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -31,7 +35,8 @@ impl Default for Config {
             sunday_first: false,
             lunar: false,
             display: 0,
-            rotation_seconds: 6,
+            clock_seconds: DEFAULT_CLOCK_SECONDS,
+            weather_seconds: DEFAULT_WEATHER_SECONDS,
             city: String::new(),
             provider: 0,
             host: String::new(),
@@ -84,8 +89,11 @@ impl Config {
                 config.clock_format = pattern.into();
             }
         }
-        if !(2..=3600).contains(&config.rotation_seconds) {
-            config.rotation_seconds = 6;
+        if !(2..=3600).contains(&config.clock_seconds) {
+            config.clock_seconds = DEFAULT_CLOCK_SECONDS;
+        }
+        if !(2..=3600).contains(&config.weather_seconds) {
+            config.weather_seconds = DEFAULT_WEATHER_SECONDS;
         }
         config
     }
@@ -97,7 +105,8 @@ impl Config {
                 self.display,
                 &["仅时间", "并排展示", "轮播展示"],
             ),
-            Field::text("轮播间隔（秒，2–3600）", self.rotation_seconds.to_string()),
+            Field::text("时间停留（秒，2–3600）", self.clock_seconds.to_string()),
+            Field::text("天气停留（秒，2–3600）", self.weather_seconds.to_string()),
             Field::choice("任务栏农历", usize::from(self.lunar), &["隐藏", "显示"]),
             Field::choice(
                 "日程提醒",
@@ -143,35 +152,29 @@ impl Config {
         ]
     }
     pub fn parse(values: &[String]) -> Result<Self> {
-        ensure!(values.len() == 14, "设置不完整");
+        ensure!(values.len() == 15, "设置不完整");
         let config = Self {
-            timezone: values[6].trim().into(),
-            sunday_first: values[7] == "1",
-            lunar: values[3] == "1",
+            timezone: values[7].trim().into(),
+            sunday_first: values[8] == "1",
+            lunar: values[4] == "1",
             display: values[1].parse::<usize>()?.min(2),
-            rotation_seconds: values[2]
-                .trim()
-                .parse::<u32>()
-                .context("轮播间隔须为 2–3600 秒的整数")?,
-            city: values[8].trim().into(),
-            provider: values[10].parse::<usize>()?.min(2),
-            host: values[11]
+            clock_seconds: dwell_seconds(&values[2], "时间停留")?,
+            weather_seconds: dwell_seconds(&values[3], "天气停留")?,
+            city: values[9].trim().into(),
+            provider: values[11].parse::<usize>()?.min(2),
+            host: values[12]
                 .trim()
                 .trim_end_matches('/')
                 .trim_start_matches("https://")
                 .into(),
-            fahrenheit: values[9] == "1",
+            fahrenheit: values[10] == "1",
             clock_format: values[0].trim().into(),
-            notifications_enabled: values[4] == "1",
-            notification_sound_enabled: values[5] == "1",
+            notifications_enabled: values[5] == "1",
+            notification_sound_enabled: values[6] == "1",
         };
         ensure!(
             config.timezone.parse::<chrono_tz::Tz>().is_ok(),
             "时区无效，请使用 IANA 时区名称"
-        );
-        ensure!(
-            (2..=3600).contains(&config.rotation_seconds),
-            "轮播间隔须为 2–3600 秒的整数"
         );
         ensure!(config.city.len() <= 160, "地区名称过长");
         ensure!(
@@ -193,6 +196,14 @@ impl Config {
         Ok(config)
     }
 }
+fn dwell_seconds(value: &str, label: &str) -> Result<u32> {
+    value
+        .trim()
+        .parse::<u32>()
+        .ok()
+        .filter(|seconds| (2..=3600).contains(seconds))
+        .with_context(|| format!("{label}须为 2–3600 秒的整数"))
+}
 pub fn key() -> Result<Option<String>> {
     match keyring::Entry::new("Ultra Bar Schedule Calendar", "qweather-api-key")?.get_password() {
         Ok(key) => Ok(Some(key)),
@@ -211,6 +222,8 @@ pub fn save_key(value: &str) -> Result<()> {
 pub struct Weather {
     pub place: String,
     pub summary: String,
+    #[serde(default)]
+    pub humidity_percent: Option<u8>,
     pub detail: String,
     pub source: String,
     pub updated: i64,
@@ -267,7 +280,21 @@ fn publish(dir: &std::path::Path, config: &Config, weather: &Weather) {
         .map(|(m, d, leap)| crate::calendar::lunar_date_label(m, d, leap))
         .unwrap_or_default();
     let tooltip = clock_tooltip(now.date_naive(), &lunar, weather);
-    let data = serde_json::json!({"version":1,"clock_format":config.clock_format,"display":config.display,"rotation_seconds":config.rotation_seconds,"lunar":if config.lunar{lunar}else{String::new()},"weather":if Utc::now().timestamp()-weather.updated<=7200{weather.summary.as_str()}else{""},"tooltip":tooltip,"utc_offset_seconds":now.offset().fix().local_minus_utc(),"updated":Utc::now().timestamp()});
+    let fresh = now.timestamp() - weather.updated <= 7200;
+    let data = serde_json::json!({
+        "version": 1,
+        "clock_format": config.clock_format,
+        "display": config.display,
+        "rotation_seconds": config.clock_seconds,
+        "clock_seconds": config.clock_seconds,
+        "weather_seconds": config.weather_seconds,
+        "lunar": if config.lunar { lunar } else { String::new() },
+        "weather": if fresh { weather.summary.as_str() } else { "" },
+        "humidity_percent": if fresh { weather.humidity_percent } else { None },
+        "tooltip": tooltip,
+        "utc_offset_seconds": now.offset().fix().local_minus_utc(),
+        "updated": now.timestamp(),
+    });
     let path = dir.join("clock.json");
     if let Ok(bytes) = serde_json::to_vec(&data) {
         let pending = dir.join("clock.json.new");
@@ -290,7 +317,12 @@ pub fn start(dir: PathBuf, public: PathBuf, mut config: Config, owner: usize) ->
             .timestamp()
             .saturating_sub(weather.updated)
             .max(0) as u64;
-        let mut due = Instant::now() + Duration::from_secs(1800u64.saturating_sub(age));
+        let wait = if !config.city.is_empty() && weather.humidity_percent.is_none() {
+            0
+        } else {
+            1800u64.saturating_sub(age)
+        };
+        let mut due = Instant::now() + Duration::from_secs(wait);
         let _ = output.try_send((weather.clone(), String::new()));
         let mut publish_due = Instant::now();
         let _ = std::fs::create_dir_all(&public);
@@ -382,7 +414,9 @@ mod tests {
     #[test]
     fn rotation_setting_defaults_for_existing_profiles_and_checks_bounds() {
         let config: Config = serde_json::from_str(r#"{"display":2}"#).unwrap();
-        assert_eq!(config.rotation_seconds, 6);
+        assert_eq!((config.clock_seconds, config.weather_seconds), (12, 4));
+        let migrated: Config = serde_json::from_str(r#"{"rotation_seconds":20}"#).unwrap();
+        assert_eq!((migrated.clock_seconds, migrated.weather_seconds), (20, 4));
         let mut values: Vec<_> = config.fields().into_iter().map(|f| f.value).collect();
         for bad in ["", "0", "1", "3601", "6.5", "no"] {
             values[2] = bad.into();
@@ -390,8 +424,14 @@ mod tests {
         }
         for good in [2, 15, 3600] {
             values[2] = good.to_string();
-            assert_eq!(Config::parse(&values).unwrap().rotation_seconds, good);
+            let parsed = Config::parse(&values).unwrap();
+            assert_eq!(parsed.clock_seconds, good);
+            assert_eq!(parsed.weather_seconds, 4);
         }
+        values[3] = "1".into();
+        assert!(Config::parse(&values).is_err());
+        values[3] = "7".into();
+        assert_eq!(Config::parse(&values).unwrap().weather_seconds, 7);
         assert!(matches!(
             config.fields()[API_KEY_FIELD].kind,
             ultra_bar_native_ui::form::Kind::Secret
@@ -405,7 +445,8 @@ mod tests {
             sunday_first: true,
             lunar: true,
             display: 2,
-            rotation_seconds: 12,
+            clock_seconds: 18,
+            weather_seconds: 5,
             city: "Tokyo".into(),
             fahrenheit: true,
             provider: 2,
@@ -416,11 +457,11 @@ mod tests {
         let fields = config.fields();
         assert_eq!(fields[0].label, "任务栏时间格式");
         assert!(matches!(
-            fields[12].kind,
+            fields[API_KEY_FIELD].kind,
             ultra_bar_native_ui::form::Kind::Secret
         ));
         let mut values: Vec<_> = fields.into_iter().map(|field| field.value).collect();
-        values[12] = "test-secret-placeholder".into();
+        values[API_KEY_FIELD] = "test-secret-placeholder".into();
         let parsed = Config::parse(&values).unwrap();
         assert_eq!(
             serde_json::to_value(parsed).unwrap(),
@@ -432,11 +473,11 @@ mod tests {
         let fields = Config::default().fields();
         let mut v: Vec<_> = fields.into_iter().map(|f| f.value).collect();
         assert!(Config::parse(&v).is_ok());
-        v[11] = "https://evil.test".into();
+        v[12] = "https://evil.test".into();
         assert!(Config::parse(&v).is_err());
-        v[11] = "abc.qweatherapi.com".into();
+        v[12] = "abc.qweatherapi.com".into();
         assert!(Config::parse(&v).is_ok());
-        v[6] = "wrong".into();
+        v[7] = "wrong".into();
         assert!(Config::parse(&v).is_err());
     }
 }

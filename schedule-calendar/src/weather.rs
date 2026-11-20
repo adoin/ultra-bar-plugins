@@ -10,6 +10,11 @@ fn coordinates(text: &str) -> Option<(f64, f64)> {
     (a.is_finite() && b.is_finite() && (-90.0..=90.0).contains(&a) && (-180.0..=180.0).contains(&b))
         .then_some((a, b))
 }
+fn humidity_percent(value: Option<f64>) -> Option<u8> {
+    value
+        .filter(|percent| (0.0..=100.0).contains(percent))
+        .map(|percent| percent.round() as u8)
+}
 fn description(code: u64) -> &'static str {
     match code {
         0 => "晴",
@@ -73,6 +78,7 @@ fn open_meteo(c: &Config) -> Result<Weather> {
     Ok(Weather {
         place,
         summary: format!("{desc} {}", temperature(temp, c.fahrenheit)),
+        humidity_percent: humidity_percent(current["relative_humidity_2m"].as_f64()),
         detail: format!(
             "体感 {} · 湿度 {}% · 风速 {} km/h · 今日 {}–{}",
             temperature(
@@ -159,6 +165,7 @@ fn qweather(c: &Config, key: &str) -> Result<Weather> {
     Ok(Weather {
         place,
         summary: format!("{desc} {}", temperature(temp, c.fahrenheit)),
+        humidity_percent: humidity_percent(value["humidity"].as_f64().map(|ratio| ratio * 100.)),
         detail: format!(
             "体感 {} · 湿度 {:.0}% · 风速 {} m/s",
             temperature(
